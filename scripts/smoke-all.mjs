@@ -2,12 +2,15 @@ import crypto from 'node:crypto';
 
 const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
 const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
+const apiAuthToken = process.env.API_AUTH_TOKEN || '';
+const ingestAuthToken = process.env.INGEST_AUTH_TOKEN || '';
 
-async function jsonFetch(url, init) {
+async function jsonFetch(url, init, authToken = '') {
   const res = await fetch(url, {
     ...init,
     headers: {
       'content-type': 'application/json',
+      ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
       ...(init?.headers || {})
     }
   });
@@ -33,7 +36,7 @@ async function seed() {
       timezone: 'UTC',
       retentionDays: 30
     })
-  });
+  }, apiAuthToken);
 
   const project = await jsonFetch(`${apiBase}/v1/projects`, {
     method: 'POST',
@@ -44,7 +47,7 @@ async function seed() {
       repoUrl: 'https://example.com/repo.git',
       defaultBranch: 'main'
     })
-  });
+  }, apiAuthToken);
 
   return { workspaceId: ws.item.id, projectId: project.item.id };
 }
@@ -57,7 +60,7 @@ async function sendIngest(type, payload) {
       idempotencyKey: crypto.randomUUID(),
       payload
     })
-  });
+  }, ingestAuthToken);
 }
 
 async function runSmoke(workspaceId, projectId) {
@@ -97,8 +100,8 @@ async function runSmoke(workspaceId, projectId) {
 }
 
 async function verify(workspaceId, projectId, runId) {
-  const runs = await jsonFetch(`${apiBase}/v1/runs?workspaceId=${workspaceId}&projectId=${projectId}`);
-  const run = await jsonFetch(`${apiBase}/v1/runs/${runId}`);
+  const runs = await jsonFetch(`${apiBase}/v1/runs?workspaceId=${workspaceId}&projectId=${projectId}`, undefined, apiAuthToken);
+  const run = await jsonFetch(`${apiBase}/v1/runs/${runId}`, undefined, apiAuthToken);
   return {
     runCount: Array.isArray(runs.items) ? runs.items.length : 0,
     runStatus: run.item?.status,

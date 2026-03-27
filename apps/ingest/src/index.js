@@ -8,6 +8,27 @@ const databaseUrl = process.env.DATABASE_URL || 'postgres://testharbor:testharbo
 const pool = new pg.Pool({ connectionString: databaseUrl });
 
 
+
+const INGEST_AUTH_TOKEN = process.env.INGEST_AUTH_TOKEN || '';
+
+function parseBearerToken(headerValue) {
+  if (!headerValue) return null;
+  const [scheme, token] = String(headerValue).split(' ');
+  if (!scheme || !token) return null;
+  if (scheme.toLowerCase() !== 'bearer') return null;
+  return token;
+}
+
+app.addHook('onRequest', async (request, reply) => {
+  if (!INGEST_AUTH_TOKEN) return;
+  if (request.url.startsWith('/healthz')) return;
+
+  const token = parseBearerToken(request.headers.authorization);
+  if (token !== INGEST_AUTH_TOKEN) {
+    return reply.code(401).send({ error: 'unauthorized' });
+  }
+});
+
 class ValidationError extends Error {
   constructor(message, details = {}) {
     super(message);

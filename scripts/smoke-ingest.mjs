@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 
 const base = process.env.INGEST_BASE_URL || 'http://localhost:4010';
+const authToken = process.env.INGEST_AUTH_TOKEN || '';
 const workspaceId = process.env.SMOKE_WORKSPACE_ID || '00000000-0000-0000-0000-000000000001';
 const projectId = process.env.SMOKE_PROJECT_ID || '00000000-0000-0000-0000-000000000002';
 const runId = crypto.randomUUID();
@@ -11,7 +12,7 @@ const artifactId = crypto.randomUUID();
 async function send(type, payload) {
   const res = await fetch(`${base}/v1/ingest/events`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(authToken ? { authorization: `Bearer ${authToken}` } : {}) },
     body: JSON.stringify({ type, idempotencyKey: crypto.randomUUID(), payload })
   });
   const body = await res.text();

@@ -1,4 +1,5 @@
 const api = process.env.API_BASE_URL || 'http://localhost:4000';
+const authToken = process.env.API_AUTH_TOKEN || '';
 
 const ORG_NAME = process.env.SEED_ORG_NAME || 'Local Org';
 const ORG_SLUG = process.env.SEED_ORG_SLUG || 'local-org';
@@ -14,6 +15,7 @@ async function jsonFetch(path, init) {
     ...init,
     headers: {
       'content-type': 'application/json',
+      ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
       ...(init?.headers || {})
     }
   });

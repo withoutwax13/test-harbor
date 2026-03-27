@@ -33,3 +33,11 @@ npm run smoke:all
 - **Port conflicts** on 5432/6379: keep the compose remaps (5433/6380).
 - **`psql: command not found`**: use `npm run db:migrate:container` (no host psql needed).
 - **API unreachable**: `docker compose up -d api && docker compose logs --tail=120 api`.
+
+## Auth (optional)
+Set these in `.env` to enforce bearer auth:
+- `API_AUTH_TOKEN`
+- `INGEST_AUTH_TOKEN`
+
+When set, all `/v1/*` routes require `Authorization: Bearer <token>`.
+`/healthz` remains open for liveness checks.

@@ -1,12 +1,13 @@
 import crypto from "node:crypto";
 const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
+const authToken = process.env.INGEST_AUTH_TOKEN || '';
 const workspaceId = process.env.SMOKE_WORKSPACE_ID || '00000000-0000-0000-0000-000000000001';
 const projectId = process.env.SMOKE_PROJECT_ID || '00000000-0000-0000-0000-000000000002';
 
 async function post(body) {
   const res = await fetch(`${ingestBase}/v1/ingest/events`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(authToken ? { authorization: `Bearer ${authToken}` } : {}) },
     body: JSON.stringify(body)
   });
   const text = await res.text();
