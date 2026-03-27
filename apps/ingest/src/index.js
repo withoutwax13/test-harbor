@@ -211,11 +211,23 @@ app.post('/v1/ingest/events', async (request, reply) => {
     throw error;
   }
 
-  const result = await withIdempotency(idempotencyKey, type, payload, async () => {
-    await handleEvent(type, payload);
-  });
+  try {
+    const result = await withIdempotency(idempotencyKey, type, payload, async () => {
+      await handleEvent(type, payload);
+    });
 
-  return reply.code(result.duplicate ? 200 : 202).send({ ok: true, ...result });
+    return reply.code(result.duplicate ? 200 : 202).send({ ok: true, ...result });
+  } catch (error) {
+    const msg = String(error?.message || error);
+    if (msg.includes('missing required fields')) {
+      return reply.code(400).send({
+        error: 'validation_error',
+        message: 'payload_missing_required_fields',
+        details: { type }
+      });
+    }
+    throw error;
+  }
 });
 
 app.setErrorHandler((error, _request, reply) => {
