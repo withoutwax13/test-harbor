@@ -16,7 +16,7 @@
     "db:migrate:container": "bash scripts/migrate-in-container.sh",
     "seed:local": "node scripts/seed-local.mjs",
     "smoke:all": "node scripts/smoke-all.mjs",
-    "smoke:all:sh": "bash scripts/smoke-all.sh",
-    "test:ingest:contract": "node scripts/test-ingest-contract.mjs"
+    "test:ingest:contract": "node scripts/test-ingest-contract.mjs",
+    "smoke:bootstrap": "bash scripts/smoke-all.sh"
   }
 }

@@ -41,3 +41,5 @@ Set these in `.env` to enforce bearer auth:
 
 When set, all `/v1/*` routes require `Authorization: Bearer <token>`.
 `/healthz` remains open for liveness checks.
+
+- Full local bootstrap: `npm run smoke:bootstrap`

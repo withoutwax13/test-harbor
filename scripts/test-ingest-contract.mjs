@@ -4,10 +4,13 @@ const authToken = process.env.INGEST_AUTH_TOKEN || '';
 const workspaceId = process.env.SMOKE_WORKSPACE_ID || '00000000-0000-0000-0000-000000000001';
 const projectId = process.env.SMOKE_PROJECT_ID || '00000000-0000-0000-0000-000000000002';
 
-async function post(body) {
+async function post(body, tokenOverride = authToken) {
   const res = await fetch(`${ingestBase}/v1/ingest/events`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...(authToken ? { authorization: `Bearer ${authToken}` } : {}) },
+    headers: {
+      'content-type': 'application/json',
+      ...(tokenOverride ? { authorization: `Bearer ${tokenOverride}` } : {})
+    },
     body: JSON.stringify(body)
   });
   const text = await res.text();
@@ -90,6 +93,28 @@ assert(badPayload.status === 400, `expected 400 for invalid payload, got ${badPa
 assert(badPayload.body?.error === 'validation_error', 'invalid payload error envelope mismatch');
 assert(Array.isArray(badPayload.body?.details?.missing), 'missing fields detail not present');
 
+let authChecks = null;
+if (authToken) {
+  const noAuth = await post({
+    type: 'heartbeat',
+    idempotencyKey: `auth-none-${crypto.randomUUID()}`,
+    payload: { runId }
+  }, '');
+  assert(noAuth.status === 401, `expected 401 without auth token, got ${noAuth.status} ${JSON.stringify(noAuth.body)}`);
+
+  const wrongAuth = await post({
+    type: 'heartbeat',
+    idempotencyKey: `auth-wrong-${crypto.randomUUID()}`,
+    payload: { runId }
+  }, `${authToken}-wrong`);
+  assert(wrongAuth.status === 401, `expected 401 with wrong token, got ${wrongAuth.status} ${JSON.stringify(wrongAuth.body)}`);
+
+  authChecks = {
+    noAuthRejected: noAuth.status,
+    wrongAuthRejected: wrongAuth.status
+  };
+}
+
 console.log(JSON.stringify({
   ok: true,
   checks: {
@@ -97,7 +122,9 @@ console.log(JSON.stringify({
     firstAccepted: first.status,
     duplicateAccepted: dup.status,
     badTypeRejected: badType.status,
-    badPayloadRejected: badPayload.status
+    badPayloadRejected: badPayload.status,
+    ...(authChecks || {})
   },
-  ingestBase
+  ingestBase,
+  authEnforced: Boolean(authToken)
 }, null, 2));
