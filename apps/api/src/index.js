@@ -128,6 +128,66 @@ app.patch('/v1/projects/:id', async (request, reply) => {
   return { item: rows[0] };
 });
 
+app.get('/v1/runs', async (request, reply) => {
+  const { workspaceId, projectId, limit = 20 } = request.query || {};
+  if (!workspaceId || !projectId) {
+    return reply.code(400).send({ error: 'workspaceId and projectId are required' });
+  }
+
+  const capped = Math.min(Number(limit) || 20, 200);
+  const { rows } = await query(
+    `select id, workspace_id, project_id, status, branch, commit_sha, started_at, finished_at,
+            total_specs, total_tests, pass_count, fail_count, flaky_count, created_at
+     from runs
+     where workspace_id = $1 and project_id = $2
+     order by created_at desc
+     limit $3`,
+    [workspaceId, projectId, capped]
+  );
+
+  return { items: rows };
+});
+
+app.get('/v1/runs/:id', async (request, reply) => {
+  const { id } = request.params;
+  const run = await query(
+    `select id, workspace_id, project_id, status, branch, commit_sha, started_at, finished_at,
+            total_specs, total_tests, pass_count, fail_count, flaky_count, created_at
+     from runs where id = $1`,
+    [id]
+  );
+  if (!run.rows.length) return reply.code(404).send({ error: 'not_found' });
+
+  const specs = await query(
+    `select id, run_id, spec_path, status, attempts, duration_ms, started_at, finished_at
+     from spec_runs where run_id = $1 order by created_at asc`,
+    [id]
+  );
+
+  const tests = await query(
+    `select tr.id, tr.spec_run_id, tr.test_case_id, tr.attempt_no, tr.status, tr.duration_ms, tr.error_hash, tr.error_message, tr.created_at,
+            tc.title as test_title, tc.file_path
+     from test_results tr
+     join test_cases tc on tc.id = tr.test_case_id
+     where tr.spec_run_id = any($1::uuid[])
+     order by tr.created_at asc`,
+    [specs.rows.map((s) => s.id)]
+  );
+
+  const artifacts = await query(
+    `select id, run_id, spec_run_id, test_result_id, type, storage_key, content_type, byte_size, created_at
+     from artifacts where run_id = $1 order by created_at asc`,
+    [id]
+  );
+
+  return {
+    item: run.rows[0],
+    specs: specs.rows,
+    tests: tests.rows,
+    artifacts: artifacts.rows
+  };
+});
+
 app.setErrorHandler((error, _req, reply) => {
   app.log.error(error);
   if (error.code === '23505') return reply.code(409).send({ error: 'conflict', detail: error.detail });

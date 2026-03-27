@@ -11,6 +11,7 @@
     "build": "npm run build --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "db:migrate": "bash scripts/run-migrations.sh"
+    "db:migrate": "bash scripts/run-migrations.sh",
+    "smoke:ingest": "node scripts/smoke-ingest.mjs"
   }
 }

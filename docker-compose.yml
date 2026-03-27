@@ -48,7 +48,7 @@ services:
       dockerfile: apps/api/Dockerfile
     environment:
       PORT: ${API_PORT:-4000}
-      DATABASE_URL: ${DATABASE_URL:-postgres://testharbor:testharbor@postgres:5432/testharbor}
+      DATABASE_URL: postgres://testharbor:testharbor@postgres:5432/testharbor
       REDIS_URL: redis://redis:6379
     ports:
       - "4000:4000"
@@ -76,7 +76,7 @@ services:
       dockerfile: apps/ingest/Dockerfile
     environment:
       PORT: ${INGEST_PORT:-4010}
-      DATABASE_URL: ${DATABASE_URL:-postgres://testharbor:testharbor@postgres:5432/testharbor}
+      DATABASE_URL: postgres://testharbor:testharbor@postgres:5432/testharbor
     ports:
       - "4010:4010"
     depends_on:
@@ -89,7 +89,7 @@ services:
       dockerfile: apps/worker/Dockerfile
     environment:
       PORT: ${WORKER_PORT:-4020}
-      DATABASE_URL: ${DATABASE_URL:-postgres://testharbor:testharbor@postgres:5432/testharbor}
+      DATABASE_URL: postgres://testharbor:testharbor@postgres:5432/testharbor
       REDIS_URL: redis://redis:6379
     ports:
       - "4020:4020"
