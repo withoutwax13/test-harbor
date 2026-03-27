@@ -17,6 +17,7 @@
     "seed:local": "node scripts/seed-local.mjs",
     "smoke:all": "node scripts/smoke-all.mjs",
     "test:ingest:contract": "node scripts/test-ingest-contract.mjs",
-    "smoke:bootstrap": "bash scripts/smoke-all.sh"
+    "smoke:bootstrap": "bash scripts/smoke-all.sh",
+    "smoke:webhooks": "node scripts/smoke-webhooks.mjs"
   }
 }
