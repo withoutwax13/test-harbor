@@ -85,8 +85,9 @@ const badPayload = await post({
     runId: crypto.randomUUID()
   }
 });
-assert(badPayload.status === 500, `expected 500 for invalid payload (current behavior), got ${badPayload.status} ${JSON.stringify(badPayload.body)}`);
-assert(badPayload.body?.error === 'ingest_failed', 'invalid payload error envelope mismatch');
+assert(badPayload.status === 400, `expected 400 for invalid payload, got ${badPayload.status} ${JSON.stringify(badPayload.body)}`);
+assert(badPayload.body?.error === 'validation_error', 'invalid payload error envelope mismatch');
+assert(Array.isArray(badPayload.body?.details?.missing), 'missing fields detail not present');
 
 console.log(JSON.stringify({
   ok: true,

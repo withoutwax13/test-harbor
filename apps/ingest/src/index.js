@@ -7,6 +7,37 @@ const port = Number(process.env.PORT || 4010);
 const databaseUrl = process.env.DATABASE_URL || 'postgres://testharbor:testharbor@localhost:5432/testharbor';
 const pool = new pg.Pool({ connectionString: databaseUrl });
 
+
+class ValidationError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = 'ValidationError';
+    this.details = details;
+  }
+}
+
+const REQUIRED_FIELDS_BY_TYPE = {
+  [INGEST_EVENT_TYPES.RUN_STARTED]: ['runId', 'workspaceId', 'projectId'],
+  [INGEST_EVENT_TYPES.RUN_FINISHED]: ['runId', 'status'],
+  [INGEST_EVENT_TYPES.SPEC_STARTED]: ['specRunId', 'runId', 'specPath'],
+  [INGEST_EVENT_TYPES.SPEC_FINISHED]: ['specRunId', 'status'],
+  [INGEST_EVENT_TYPES.TEST_RESULT]: ['testResultId', 'specRunId', 'status'],
+  [INGEST_EVENT_TYPES.ARTIFACT_REGISTERED]: ['artifactId', 'runId', 'type', 'storageKey'],
+  [INGEST_EVENT_TYPES.HEARTBEAT]: ['runId']
+};
+
+function missingKeys(obj, keys) {
+  return (keys || []).filter((k) => !Object.prototype.hasOwnProperty.call(obj || {}, k));
+}
+
+function validatePayloadShape(type, payload) {
+  const required = REQUIRED_FIELDS_BY_TYPE[type] || [];
+  const missing = missingKeys(payload, required);
+  if (missing.length) {
+    throw new ValidationError('payload_missing_required_fields', { type, missing });
+  }
+}
+
 async function query(sql, params = []) {
   const client = await pool.connect();
   try {
@@ -166,6 +197,19 @@ app.post('/v1/ingest/events', async (request, reply) => {
   const { type, idempotencyKey, payload } = request.body || {};
   if (!type || !idempotencyKey || !payload) return reply.code(400).send({ error: 'type, idempotencyKey, payload are required' });
   if (!isValidIngestType(type)) return reply.code(400).send({ error: `unsupported_event_type: ${type}` });
+
+  try {
+    validatePayloadShape(type, payload);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      return reply.code(400).send({
+        error: 'validation_error',
+        message: error.message,
+        details: error.details
+      });
+    }
+    throw error;
+  }
 
   const result = await withIdempotency(idempotencyKey, type, payload, async () => {
     await handleEvent(type, payload);
