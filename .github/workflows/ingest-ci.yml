@@ -1,0 +1,48 @@
+name: Ingest CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ingest-contract-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      API_AUTH_TOKEN: ci-api-token
+      INGEST_AUTH_TOKEN: ci-ingest-token
+      API_BASE_URL: http://localhost:4000
+      INGEST_BASE_URL: http://localhost:4010
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start stack
+        run: docker compose up -d postgres redis minio ingest api
+
+      - name: Run migrations (in container)
+        run: npm run db:migrate:container
+
+      - name: Seed local domain rows
+        run: npm run seed:local
+
+      - name: Contract test
+        run: npm run test:ingest:contract
+
+      - name: End-to-end smoke
+        run: npm run smoke:all
+
+      - name: Print compose logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200
