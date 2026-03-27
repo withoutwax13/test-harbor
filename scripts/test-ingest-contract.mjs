@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
+const workspaceId = process.env.SMOKE_WORKSPACE_ID || '00000000-0000-0000-0000-000000000001';
+const projectId = process.env.SMOKE_PROJECT_ID || '00000000-0000-0000-0000-000000000002';
 
 async function post(body) {
   const res = await fetch(`${ingestBase}/v1/ingest/events`, {
@@ -24,6 +26,21 @@ function assert(cond, msg) {
 const runId = crypto.randomUUID();
 const specRunId = crypto.randomUUID();
 const idempotencyKey = `contract-${crypto.randomUUID()}`;
+
+// 0) ensure parent run exists (FK-safe for spec.started)
+const runStart = await post({
+  type: 'run.started',
+  idempotencyKey: `contract-run-${crypto.randomUUID()}`,
+  payload: {
+    runId,
+    workspaceId,
+    projectId,
+    branch: 'contract',
+    commitSha: 'contract-smoke',
+    ciProvider: 'local'
+  }
+});
+assert(runStart.status === 202, `expected 202 run.started, got ${runStart.status} ${JSON.stringify(runStart.body)}`);
 
 // 1) first acceptance
 const first = await post({
@@ -74,6 +91,7 @@ assert(badPayload.body?.error === 'ingest_failed', 'invalid payload error envelo
 console.log(JSON.stringify({
   ok: true,
   checks: {
+    runStarted: runStart.status,
     firstAccepted: first.status,
     duplicateAccepted: dup.status,
     badTypeRejected: badType.status,
