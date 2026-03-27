@@ -12,6 +12,9 @@
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "db:migrate": "bash scripts/run-migrations.sh",
-    "smoke:ingest": "node scripts/smoke-ingest.mjs"
+    "smoke:ingest": "node scripts/smoke-ingest.mjs",
+    "db:migrate:container": "bash scripts/migrate-in-container.sh",
+    "seed:local": "node scripts/seed-local.mjs",
+    "smoke:all": "node scripts/smoke-all.mjs"
   }
 }
