@@ -128,6 +128,74 @@ app.patch('/v1/projects/:id', async (request, reply) => {
   return { item: rows[0] };
 });
 
+
+app.get('/v1/projects/:id/latest-run', async (request, reply) => {
+  const { id } = request.params;
+  const { rows } = await query(
+    `select id, workspace_id, project_id, status, branch, commit_sha, started_at, finished_at,
+            total_specs, total_tests, pass_count, fail_count, flaky_count, created_at
+     from runs
+     where project_id = $1
+     order by created_at desc
+     limit 1`,
+    [id]
+  );
+  if (!rows.length) return reply.code(404).send({ error: 'not_found' });
+  return { item: rows[0] };
+});
+
+app.get('/v1/runs/:id/summary', async (request, reply) => {
+  const { id } = request.params;
+
+  const run = await query(
+    `select id, workspace_id, project_id, status, branch, commit_sha, started_at, finished_at,
+            total_specs, total_tests, pass_count, fail_count, flaky_count, created_at
+     from runs where id = $1`,
+    [id]
+  );
+  if (!run.rows.length) return reply.code(404).send({ error: 'not_found' });
+
+  const specStats = await query(
+    `select
+      count(*)::int as spec_count,
+      coalesce(sum(duration_ms), 0)::int as total_spec_duration_ms,
+      coalesce(max(duration_ms), 0)::int as slowest_spec_duration_ms,
+      coalesce((array_agg(spec_path order by duration_ms desc nulls last))[1], null) as slowest_spec_path
+     from spec_runs
+     where run_id = $1`,
+    [id]
+  );
+
+  const testStats = await query(
+    `select
+      count(*)::int as test_count,
+      count(*) filter (where status = 'passed')::int as passed,
+      count(*) filter (where status = 'failed')::int as failed,
+      count(*) filter (where status = 'flaky')::int as flaky,
+      coalesce(sum(duration_ms), 0)::int as total_test_duration_ms
+     from test_results tr
+     join spec_runs sr on sr.id = tr.spec_run_id
+     where sr.run_id = $1`,
+    [id]
+  );
+
+  const artifactStats = await query(
+    `select count(*)::int as artifact_count,
+            coalesce(sum(byte_size), 0)::bigint as total_artifact_bytes
+     from artifacts where run_id = $1`,
+    [id]
+  );
+
+  return {
+    item: run.rows[0],
+    summary: {
+      specs: specStats.rows[0],
+      tests: testStats.rows[0],
+      artifacts: artifactStats.rows[0]
+    }
+  };
+});
+
 app.get('/v1/runs', async (request, reply) => {
   const { workspaceId, projectId, limit = 20 } = request.query || {};
   if (!workspaceId || !projectId) {
