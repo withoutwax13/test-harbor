@@ -7,7 +7,8 @@ DB_NAME=${POSTGRES_DB:-testharbor}
 for file in \
   infra/db/migrations/001_init.sql \
   infra/db/migrations/002_core_extensions.sql \
-  infra/db/migrations/003_ingest_idempotency.sql
+  infra/db/migrations/003_ingest_idempotency.sql \
+  infra/db/migrations/004_webhook_deliveries.sql
 
 do
   echo "Applying $file ..."

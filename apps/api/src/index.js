@@ -217,6 +217,74 @@ app.get('/v1/runs/:id/summary', async (request, reply) => {
   };
 });
 
+
+app.get('/v1/webhook-endpoints', async (request, reply) => {
+  const { workspaceId } = request.query || {};
+  if (!workspaceId) return reply.code(400).send({ error: 'workspaceId is required' });
+
+  const { rows } = await query(
+    `select id, workspace_id, type, target_url, enabled, created_at
+     from webhook_endpoints
+     where workspace_id = $1
+     order by created_at desc`,
+    [workspaceId]
+  );
+  return { items: rows };
+});
+
+app.post('/v1/webhook-endpoints', async (request, reply) => {
+  const { workspaceId, type, targetUrl, secret = null, enabled = true } = request.body || {};
+  if (!workspaceId || !type || !targetUrl) {
+    return reply.code(400).send({ error: 'workspaceId, type, targetUrl are required' });
+  }
+
+  const { rows } = await query(
+    `insert into webhook_endpoints(workspace_id, type, target_url, secret, enabled)
+     values ($1, $2, $3, $4, $5)
+     returning id, workspace_id, type, target_url, enabled, created_at`,
+    [workspaceId, type, targetUrl, secret, enabled]
+  );
+
+  return reply.code(201).send({ item: rows[0] });
+});
+
+app.patch('/v1/webhook-endpoints/:id', async (request, reply) => {
+  const { id } = request.params;
+  const { targetUrl, secret, enabled } = request.body || {};
+
+  const { rows } = await query(
+    `update webhook_endpoints
+     set target_url = coalesce($2, target_url),
+         secret = coalesce($3, secret),
+         enabled = coalesce($4, enabled)
+     where id = $1
+     returning id, workspace_id, type, target_url, enabled, created_at`,
+    [id, targetUrl ?? null, secret ?? null, enabled ?? null]
+  );
+
+  if (!rows.length) return reply.code(404).send({ error: 'not_found' });
+  return { item: rows[0] };
+});
+
+app.get('/v1/webhook-deliveries', async (request, reply) => {
+  const { workspaceId, status, limit = 50 } = request.query || {};
+  if (!workspaceId) return reply.code(400).send({ error: 'workspaceId is required' });
+
+  const capped = Math.min(Number(limit) || 50, 200);
+  const { rows } = await query(
+    `select id, notification_event_id, webhook_endpoint_id, event_type, target_url,
+            attempt_count, max_attempts, status, next_retry_at, last_attempt_at, delivered_at,
+            response_status, last_error, created_at, updated_at
+     from webhook_deliveries
+     where workspace_id = $1 and ($2::text is null or status = $2)
+     order by created_at desc
+     limit $3`,
+    [workspaceId, status ?? null, capped]
+  );
+
+  return { items: rows };
+});
+
 app.get('/v1/runs', async (request, reply) => {
   const { workspaceId, projectId, limit = 20 } = request.query || {};
   if (!workspaceId || !projectId) {

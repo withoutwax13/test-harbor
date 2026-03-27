@@ -7,9 +7,8 @@ const port = Number(process.env.PORT || 4010);
 const databaseUrl = process.env.DATABASE_URL || 'postgres://testharbor:testharbor@localhost:5432/testharbor';
 const pool = new pg.Pool({ connectionString: databaseUrl });
 
-
-
 const INGEST_AUTH_TOKEN = process.env.INGEST_AUTH_TOKEN || '';
+const EMIT_TEST_RESULT_WEBHOOKS = String(process.env.EMIT_TEST_RESULT_WEBHOOKS || '').toLowerCase() === 'true';
 
 function parseBearerToken(headerValue) {
   if (!headerValue) return null;
@@ -96,6 +95,36 @@ async function withIdempotency(idempotencyKey, eventType, payload, handler) {
   }
 }
 
+async function enqueueWebhooks({ eventType, workspaceId, runId = null, payload }) {
+  const notification = await query(
+    `insert into notification_events(workspace_id, run_id, channel, payload, status)
+     values ($1, $2, 'webhook', $3::jsonb, 'queued')
+     returning id`,
+    [workspaceId, runId, JSON.stringify({ eventType, payload })]
+  );
+
+  const notificationEventId = notification.rows[0].id;
+  const endpoints = await query(
+    `select id, target_url
+     from webhook_endpoints
+     where workspace_id = $1 and enabled = true and type = $2`,
+    [workspaceId, eventType]
+  );
+
+  for (const ep of endpoints.rows) {
+    await query(
+      `insert into webhook_deliveries (
+         notification_event_id, webhook_endpoint_id, workspace_id,
+         event_type, target_url, payload, status, next_retry_at
+       )
+       values ($1, $2, $3, $4, $5, $6::jsonb, 'queued', now())
+       on conflict (notification_event_id, webhook_endpoint_id)
+       do nothing`,
+      [notificationEventId, ep.id, workspaceId, eventType, ep.target_url, JSON.stringify(payload)]
+    );
+  }
+}
+
 async function resolveTestCaseId(payload) {
   if (payload.testCaseId) return payload.testCaseId;
   if (!requireKeys(payload, ['projectId', 'stableTestKey', 'title', 'filePath'])) {
@@ -112,6 +141,22 @@ async function resolveTestCaseId(payload) {
   );
 
   return row.rows[0].id;
+}
+
+async function lookupRunContextByRunId(runId) {
+  const res = await query('select id, workspace_id, project_id from runs where id = $1', [runId]);
+  return res.rows[0] || null;
+}
+
+async function lookupRunContextBySpecRunId(specRunId) {
+  const res = await query(
+    `select r.id as run_id, r.workspace_id, r.project_id
+     from spec_runs s
+     join runs r on r.id = s.run_id
+     where s.id = $1`,
+    [specRunId]
+  );
+  return res.rows[0] || null;
 }
 
 async function handleEvent(type, payload) {
@@ -139,6 +184,16 @@ async function handleEvent(type, payload) {
          where id=$1`,
         [payload.runId, payload.status, payload.finishedAt ?? null, payload.totalSpecs ?? null, payload.totalTests ?? null, payload.passCount ?? null, payload.failCount ?? null, payload.flakyCount ?? null]
       );
+
+      const ctx = await lookupRunContextByRunId(payload.runId);
+      if (ctx) {
+        await enqueueWebhooks({
+          eventType: INGEST_EVENT_TYPES.RUN_FINISHED,
+          workspaceId: ctx.workspace_id,
+          runId: ctx.id,
+          payload: { type, payload }
+        });
+      }
       return;
     }
     case INGEST_EVENT_TYPES.SPEC_STARTED: {
@@ -159,6 +214,16 @@ async function handleEvent(type, payload) {
          where id=$1`,
         [payload.specRunId, payload.status, payload.durationMs ?? null, payload.attempts ?? null, payload.finishedAt ?? null]
       );
+
+      const ctx = await lookupRunContextBySpecRunId(payload.specRunId);
+      if (ctx) {
+        await enqueueWebhooks({
+          eventType: INGEST_EVENT_TYPES.SPEC_FINISHED,
+          workspaceId: ctx.workspace_id,
+          runId: ctx.run_id,
+          payload: { type, payload }
+        });
+      }
       return;
     }
     case INGEST_EVENT_TYPES.TEST_RESULT: {
@@ -176,6 +241,18 @@ async function handleEvent(type, payload) {
            stacktrace=excluded.stacktrace`,
         [payload.testResultId, payload.specRunId, testCaseId, payload.attemptNo ?? 1, payload.status, payload.durationMs ?? null, payload.errorHash ?? null, payload.errorMessage ?? null, payload.stacktrace ?? null]
       );
+
+      if (EMIT_TEST_RESULT_WEBHOOKS) {
+        const ctx = await lookupRunContextBySpecRunId(payload.specRunId);
+        if (ctx) {
+          await enqueueWebhooks({
+            eventType: INGEST_EVENT_TYPES.TEST_RESULT,
+            workspaceId: ctx.workspace_id,
+            runId: ctx.run_id,
+            payload: { type, payload }
+          });
+        }
+      }
       return;
     }
     case INGEST_EVENT_TYPES.ARTIFACT_REGISTERED: {
