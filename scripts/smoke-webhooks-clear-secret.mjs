@@ -123,13 +123,16 @@ try {
   await postIngest('run.started', { runId: runId1, workspaceId, projectId, branch: 'main', commitSha: 'secret-on', ciProvider: 'local' });
   await postIngest('run.finished', { runId: runId1, status: 'passed', totalSpecs: 1, totalTests: 1, passCount: 1, failCount: 0, flakyCount: 0 });
 
+  const findRunRequest = (runId) => requests.find((r) => r?.body?.payload?.runId === runId && r?.body?.type === 'run.finished');
+
   const deadline1 = Date.now() + waitTimeoutMs;
-  while (Date.now() < deadline1 && requests.length < 1) {
+  while (Date.now() < deadline1 && !findRunRequest(runId1)) {
     await sleep(800);
   }
-  if (!requests.length) throw new Error('did not receive first webhook request in time');
+  const firstRequest = findRunRequest(runId1);
+  if (!firstRequest) throw new Error(`did not receive first run.finished webhook for runId=${runId1} in time`);
 
-  const firstHasSignature = Boolean(requests[0].headers['x-testharbor-signature']);
+  const firstHasSignature = Boolean(firstRequest.headers['x-testharbor-signature']);
   if (!firstHasSignature) throw new Error('expected signature on first request before clearing secret');
 
   await patchEndpoint(endpointId, { secret: null });
@@ -139,12 +142,13 @@ try {
   await postIngest('run.finished', { runId: runId2, status: 'passed', totalSpecs: 1, totalTests: 1, passCount: 1, failCount: 0, flakyCount: 0 });
 
   const deadline2 = Date.now() + waitTimeoutMs;
-  while (Date.now() < deadline2 && requests.length < 2) {
+  while (Date.now() < deadline2 && !findRunRequest(runId2)) {
     await sleep(800);
   }
-  if (requests.length < 2) throw new Error('did not receive second webhook request in time');
+  const secondRequest = findRunRequest(runId2);
+  if (!secondRequest) throw new Error(`did not receive second run.finished webhook for runId=${runId2} in time`);
 
-  const secondHasSignature = Boolean(requests[1].headers['x-testharbor-signature']);
+  const secondHasSignature = Boolean(secondRequest.headers['x-testharbor-signature']);
   if (secondHasSignature) throw new Error('expected no signature after clearing secret');
 
   console.log(JSON.stringify({
@@ -155,7 +159,8 @@ try {
     checks: {
       firstHasSignature,
       secondHasSignature,
-      secretClearedBehaviorVerified: firstHasSignature && !secondHasSignature
+      secretClearedBehaviorVerified: firstHasSignature && !secondHasSignature,
+      correlatedRunIds: { first: runId1, second: runId2 }
     }
   }, null, 2));
 } finally {
