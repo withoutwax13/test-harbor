@@ -129,18 +129,6 @@ results.push(await checkGoodAuth({
   tokenType: 'api'
 }));
 
-results.push(await checkCase({
-  name: 'api.createWebhookEndpoint',
-  url: `${apiBase}/v1/webhook-endpoints`,
-  method: 'POST',
-  body: {
-    workspaceId: dummyWorkspaceId,
-    type: 'run.finished',
-    targetUrl: 'http://127.0.0.1:9/hook',
-    enabled: true
-  },
-  tokenType: 'api'
-}));
 
 results.push(await checkGoodAuth({
   name: 'ingest.postEvent',

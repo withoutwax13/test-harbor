@@ -10,6 +10,8 @@
 - `55bd282` Improve webhook smoke polling diagnostics (B9 utility hardening and suite outputs)
 - `a4f9130` Add safe webhook smoke cleanup and auth checks (B9 hygiene + auth-negative)
 - `be70c3c` Add Batch 9 release notes
+- `0e26dfd` Fix smoke helper auth reference and intermediary release notes
+- `9b6c1f3` Finalize Batch 9 notes and auth-negative preflight
 
 ## Commands
 ```bash
