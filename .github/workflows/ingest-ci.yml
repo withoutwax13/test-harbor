@@ -31,7 +31,7 @@ jobs:
         run: npm ci
 
       - name: Start stack
-        run: docker compose up -d postgres redis minio ingest api
+        run: docker compose up -d postgres redis minio ingest api worker
 
       - name: Run migrations (in container)
         run: npm run db:migrate:container
