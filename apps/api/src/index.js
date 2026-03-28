@@ -452,15 +452,17 @@ function buildSlackPayload({ run, summary, failures, workspaceId }) {
 }
 
 function buildDiscordPayload({ run, summary, failures }) {
+  const tests = summary?.tests || { test_count: 0, failed: 0, flaky: 0 };
+  const list = Array.isArray(failures) ? failures : [];
   return {
     content: `Run ${run.id} ${run.status}`,
     embeds: [
       {
         title: `TestHarbor run ${run.branch || 'unknown-branch'}`,
-        description: `${summary.tests.test_count} tests, ${summary.tests.failed} failed, ${summary.tests.flaky} flaky`,
-        fields: failures.slice(0, 3).map((failure) => ({
-          name: failure.title,
-          value: `${failure.spec_path}: ${failure.error_message || failure.status}`
+        description: `${tests.test_count || 0} tests, ${tests.failed || 0} failed, ${tests.flaky || 0} flaky`,
+        fields: list.slice(0, 3).map((failure) => ({
+          name: failure.title || 'unknown failure',
+          value: `${failure.spec_path || failure.file_path || 'n/a'}: ${failure.error_message || failure.status || 'unknown'}`
         }))
       }
     ]
@@ -503,14 +505,11 @@ function formatNotificationPayload({ channel, runBundle, workspaceId }) {
   }
 
   const normalizedBundle = {
-    run: runBundle.run || runBundle.item,
-    summary: runBundle.summary,
-    failures: runBundle.failures || []
+    run: runBundle.run || runBundle.item || { id: 'unknown', status: 'unknown', branch: null },
+    summary: runBundle.summary || { tests: { test_count: 0, failed: 0, flaky: 0 } },
+    failures: Array.isArray(runBundle.failures) ? runBundle.failures : []
   };
 
-  if (!normalizedBundle.run) {
-    throw new Error('run_bundle_missing_run');
-  }
 
   if (channel === 'discord') {
     return { channel, payload: buildDiscordPayload({ ...normalizedBundle, workspaceId }) };
