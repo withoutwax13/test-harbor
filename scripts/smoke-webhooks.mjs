@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
 const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
@@ -30,6 +32,8 @@ function defaultWaitTimeoutMs() {
 }
 
 const waitTimeoutMs = Number(process.env.WEBHOOK_WAIT_TIMEOUT_MS || defaultWaitTimeoutMs());
+const artifactDir = process.env.WEBHOOK_ARTIFACT_DIR || '';
+const disableEndpointOnExit = process.env.WEBHOOK_DISABLE_ENDPOINT_ON_EXIT !== '0';
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -122,6 +126,27 @@ async function listDeliveries(workspaceId) {
   return jsonFetch(`${apiBase}/v1/webhook-deliveries?workspaceId=${workspaceId}&limit=200`, undefined, apiAuthToken);
 }
 
+async function disableEndpoint(endpointId) {
+  return jsonFetch(`${apiBase}/v1/webhook-endpoints/${endpointId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ enabled: false })
+  }, apiAuthToken);
+}
+
+
+function artifactStamp() {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+async function maybeWriteArtifact(payload) {
+  if (!artifactDir) return null;
+  const outDir = path.resolve(artifactDir);
+  await fs.mkdir(outDir, { recursive: true });
+  const file = path.join(outDir, `webhook-smoke-${artifactStamp()}-${expectDead ? 'dead' : 'delivered'}.json`);
+  await fs.writeFile(file, JSON.stringify(payload, null, 2));
+  return file;
+}
+
 let received = 0;
 const requests = [];
 const server = http.createServer(async (req, res) => {
@@ -156,9 +181,13 @@ const server = http.createServer(async (req, res) => {
 
 await new Promise((resolve) => server.listen(mockPort, '0.0.0.0', resolve));
 
+let workspaceId = null;
+let projectId = null;
+let endpointId = null;
+
 try {
   await assertWebhookApiRoutesAvailable();
-  const { workspaceId, projectId } = await seedWorkspaceProject();
+  ({ workspaceId, projectId } = await seedWorkspaceProject());
   if (!Number.isFinite(failCountBeforeSuccess) || failCountBeforeSuccess < 0) {
     throw new Error('WEBHOOK_MOCK_FAILS must be a non-negative number');
   }
@@ -178,7 +207,8 @@ try {
   const target = `http://${webhookTargetHost}:${mockPort}${mockPath}`;
   const webhookSecret = 'smoke-secret';
 
-  await createEndpoint(workspaceId, target, 'run.finished', webhookSecret);
+  const endpoint = await createEndpoint(workspaceId, target, 'run.finished', webhookSecret);
+  endpointId = endpoint?.item?.id || null;
 
   const runId = crypto.randomUUID();
   await postIngest('run.started', {
@@ -243,7 +273,7 @@ try {
     throw new Error('expected x-testharbor-signature header on at least one webhook request');
   }
 
-  console.log(JSON.stringify({
+  const output = {
     ok: true,
     workspaceId,
     projectId,
@@ -269,7 +299,13 @@ try {
       event: r.headers['x-testharbor-event'],
       signaturePresent: Boolean(r.headers['x-testharbor-signature'])
     }))
-  }, null, 2));
+  };
+  const artifactPath = await maybeWriteArtifact(output);
+  if (artifactPath) output.artifactPath = artifactPath;
+  console.log(JSON.stringify(output, null, 2));
 } finally {
+  if (endpointId && disableEndpointOnExit) {
+    await disableEndpoint(endpointId).catch(() => {});
+  }
   await new Promise((resolve) => server.close(resolve));
 }

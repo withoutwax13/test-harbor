@@ -43,3 +43,22 @@ When set, all `/v1/*` routes require `Authorization: Bearer <token>`.
 `/healthz` remains open for liveness checks.
 
 - Full local bootstrap: `npm run smoke:bootstrap`
+
+
+## Webhook smoke evidence (Batch6B/6C)
+
+Validated runtime paths:
+- `npm run smoke:webhooks` → delivered path with retries + signature header
+- `npm run smoke:webhooks:dead` → dead-letter path at max attempts
+
+Useful commands:
+- `npm run smoke:webhooks:suite` (runs both and writes combined JSON artifact)
+- `npm run smoke:webhooks:auth` (requires `API_AUTH_TOKEN` + `INGEST_AUTH_TOKEN`)
+- `npm run smoke:webhooks:dead:auth` (requires `API_AUTH_TOKEN` + `INGEST_AUTH_TOKEN`)
+
+Artifact persistence:
+- Set `WEBHOOK_ARTIFACT_DIR` (default for suite: `artifacts/webhooks`)
+- Harness now writes per-run artifact when `WEBHOOK_ARTIFACT_DIR` is set
+
+Teardown hygiene:
+- Harness disables the created webhook endpoint on exit (`WEBHOOK_DISABLE_ENDPOINT_ON_EXIT=0` to opt out).
