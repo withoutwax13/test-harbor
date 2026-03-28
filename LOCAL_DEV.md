@@ -62,3 +62,22 @@ Artifact persistence:
 
 Teardown hygiene:
 - Harness disables the created webhook endpoint on exit (`WEBHOOK_DISABLE_ENDPOINT_ON_EXIT=0` to opt out).
+
+## Batch 6 wrap-up status (2026-03-28)
+
+Batch 6 webhook reliability validation is complete.
+
+Verified green lanes:
+- `npm run smoke:webhooks` (delivered path with retries)
+- `npm run smoke:webhooks:dead` (dead-letter path at max attempts)
+- `npm run smoke:webhooks:auth` (auth-enabled delivered path)
+- `npm run smoke:webhooks:dead:auth` (auth-enabled dead-letter path)
+
+Evidence:
+- Combined suite artifact generated via `npm run smoke:webhooks:suite`
+- Example artifact path: `artifacts/webhooks/webhook-smoke-suite-*.json`
+
+Decision:
+- Batch 6 (B/6C scope) is closed for runtime verification.
+- Proceed to Batch 7 planning/implementation.
+
