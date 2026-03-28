@@ -11,9 +11,9 @@
     "build": "npm run build --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "db:migrate": "bash scripts/run-migrations.sh",
+    "db:migrate": "node scripts/db-migrate-container.mjs",
     "smoke:ingest": "node scripts/smoke-ingest.mjs",
-    "db:migrate:container": "bash scripts/migrate-in-container.sh",
+    "db:migrate:container": "node scripts/db-migrate-container.mjs",
     "seed:local": "node scripts/seed-local.mjs",
     "smoke:all": "node scripts/smoke-all.mjs",
     "test:ingest:contract": "node scripts/test-ingest-contract.mjs",
@@ -28,6 +28,8 @@
     "smoke:webhooks:disable-after-queue": "node scripts/smoke-webhooks-disable-after-queue.mjs",
     "smoke:webhooks:route-contract": "node scripts/smoke-webhooks-route-contract.mjs",
     "smoke:auth-explorer": "node scripts/smoke-auth-explorer.mjs",
-    "smoke:notifications-retention": "node scripts/smoke-notifications-retention.mjs"
+    "smoke:notifications-retention": "node scripts/smoke-notifications-retention.mjs",
+    "smoke:auth:explorer": "node scripts/smoke-auth-explorer.mjs",
+    "smoke:notifications:retention": "node scripts/smoke-notifications-retention.mjs"
   }
 }
