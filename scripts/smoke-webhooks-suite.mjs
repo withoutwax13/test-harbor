@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 const outDir = path.resolve(process.env.WEBHOOK_ARTIFACT_DIR || 'artifacts/webhooks');
+const includeClearSecret = process.env.WEBHOOK_INCLUDE_CLEAR_SECRET !== '0';
 
 function runNode(script) {
   return new Promise((resolve, reject) => {
@@ -37,13 +38,15 @@ await fs.mkdir(outDir, { recursive: true });
 
 const delivered = await runNode('scripts/smoke-webhooks.mjs');
 const dead = await runNode('scripts/smoke-webhooks-dead.mjs');
+const clearSecret = includeClearSecret ? await runNode('scripts/smoke-webhooks-clear-secret.mjs') : null;
 
 const combined = {
   ok: true,
   generatedAt: new Date().toISOString(),
   delivered,
-  dead
+  dead,
+  ...(includeClearSecret ? { clearSecret } : {})
 };
 const suitePath = path.join(outDir, `webhook-smoke-suite-${stamp}.json`);
 await fs.writeFile(suitePath, JSON.stringify(combined, null, 2));
-console.log(JSON.stringify({ ok: true, artifactPath: suitePath }, null, 2));
+console.log(JSON.stringify({ ok: true, artifactPath: suitePath, includeClearSecret }, null, 2));

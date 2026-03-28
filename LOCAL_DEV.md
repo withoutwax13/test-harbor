@@ -52,7 +52,7 @@ Validated runtime paths:
 - `npm run smoke:webhooks:dead` → dead-letter path at max attempts
 
 Useful commands:
-- `npm run smoke:webhooks:suite` (runs both and writes combined JSON artifact)
+- `npm run smoke:webhooks:suite` (runs delivered + dead + clear-secret checks and writes combined JSON artifact)
 - `npm run smoke:webhooks:auth` (requires `API_AUTH_TOKEN` + `INGEST_AUTH_TOKEN`)
 - `npm run smoke:webhooks:dead:auth` (requires `API_AUTH_TOKEN` + `INGEST_AUTH_TOKEN`)
 
@@ -81,3 +81,12 @@ Decision:
 - Batch 6 (B/6C scope) is closed for runtime verification.
 - Proceed to Batch 7 planning/implementation.
 
+## Batch 7 kickoff checks
+
+Webhook endpoint patch semantics hardening:
+- `npm run smoke:webhooks:clear-secret`
+  - verifies signature exists before `PATCH secret:null`
+  - verifies signature is absent after secret is cleared
+
+
+- To skip clear-secret in suite: `WEBHOOK_INCLUDE_CLEAR_SECRET=0 npm run smoke:webhooks:suite`

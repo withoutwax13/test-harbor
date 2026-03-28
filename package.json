@@ -22,6 +22,7 @@
     "smoke:webhooks:dead": "node scripts/smoke-webhooks-dead.mjs",
     "smoke:webhooks:auth": "node scripts/smoke-webhooks-auth.mjs",
     "smoke:webhooks:dead:auth": "node scripts/smoke-webhooks-dead-auth.mjs",
-    "smoke:webhooks:suite": "node scripts/smoke-webhooks-suite.mjs"
+    "smoke:webhooks:suite": "node scripts/smoke-webhooks-suite.mjs",
+    "smoke:webhooks:clear-secret": "node scripts/smoke-webhooks-clear-secret.mjs"
   }
 }

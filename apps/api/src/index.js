@@ -250,16 +250,46 @@ app.post('/v1/webhook-endpoints', async (request, reply) => {
 
 app.patch('/v1/webhook-endpoints/:id', async (request, reply) => {
   const { id } = request.params;
-  const { targetUrl, secret, enabled } = request.body || {};
+  const body = request.body || {};
+
+  const hasTargetUrl = Object.prototype.hasOwnProperty.call(body, 'targetUrl');
+  const hasSecret = Object.prototype.hasOwnProperty.call(body, 'secret');
+  const hasEnabled = Object.prototype.hasOwnProperty.call(body, 'enabled');
+
+  const { targetUrl, secret, enabled } = body;
+
+  if (!hasTargetUrl && !hasSecret && !hasEnabled) {
+    return reply.code(400).send({ error: 'at least one of targetUrl, secret, enabled is required' });
+  }
+
+  if (hasTargetUrl && (!targetUrl || typeof targetUrl !== 'string')) {
+    return reply.code(400).send({ error: 'targetUrl must be a non-empty string when provided' });
+  }
+
+  if (hasEnabled && typeof enabled !== 'boolean') {
+    return reply.code(400).send({ error: 'enabled must be boolean when provided' });
+  }
+
+  if (hasSecret && !(secret === null || typeof secret === 'string')) {
+    return reply.code(400).send({ error: 'secret must be string|null when provided' });
+  }
 
   const { rows } = await query(
     `update webhook_endpoints
-     set target_url = coalesce($2, target_url),
-         secret = coalesce($3, secret),
-         enabled = coalesce($4, enabled)
+     set target_url = case when $2::boolean then $3 else target_url end,
+         secret = case when $4::boolean then $5 else secret end,
+         enabled = case when $6::boolean then $7 else enabled end
      where id = $1
      returning id, workspace_id, type, target_url, enabled, created_at`,
-    [id, targetUrl ?? null, secret ?? null, enabled ?? null]
+    [
+      id,
+      hasTargetUrl,
+      hasTargetUrl ? targetUrl : null,
+      hasSecret,
+      hasSecret ? secret : null,
+      hasEnabled,
+      hasEnabled ? enabled : null
+    ]
   );
 
   if (!rows.length) return reply.code(404).send({ error: 'not_found' });
