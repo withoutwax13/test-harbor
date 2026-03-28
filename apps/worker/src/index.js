@@ -9,6 +9,8 @@ const MAX_BATCH = Number(process.env.WEBHOOK_WORKER_MAX_BATCH || 20);
 const WEBHOOK_TIMEOUT_MS = Number(process.env.WEBHOOK_TIMEOUT_MS || 6000);
 const MAX_ATTEMPTS = Number(process.env.WEBHOOK_MAX_ATTEMPTS || 5);
 const BASE_BACKOFF_MS = Number(process.env.WEBHOOK_BASE_BACKOFF_MS || 2000);
+const ENABLE_RETENTION_WORKER = process.env.ENABLE_RETENTION_WORKER !== '0';
+const RETENTION_WORKER_POLL_MS = Number(process.env.RETENTION_WORKER_POLL_MS || 30000);
 
 async function query(sql, params = []) {
   const client = await pool.connect();
@@ -197,12 +199,74 @@ async function tick() {
   }
 }
 
+function retentionCutoffIso(retentionDays) {
+  return new Date(Date.now() - (Number(retentionDays || 30) * 24 * 60 * 60 * 1000)).toISOString();
+}
+
+async function recordRetentionAudit(workspaceId, runRow, cutoff) {
+  await query(
+    `insert into audit_logs(workspace_id, actor_user_id, action, entity_type, entity_id, meta_json)
+     values ($1, null, 'retention.purge', 'run', $2, $3::jsonb)`,
+    [
+      workspaceId,
+      runRow.id,
+      JSON.stringify({
+        projectId: runRow.project_id,
+        artifactCount: Number(runRow.artifact_count || 0),
+        cutoff
+      })
+    ]
+  );
+}
+
+async function retentionTick() {
+  if (!ENABLE_RETENTION_WORKER) return;
+
+  const workspaceRows = await query(
+    `select id, retention_days
+     from workspaces
+     where retention_days > 0`
+  );
+
+  for (const workspace of workspaceRows.rows) {
+    const cutoff = retentionCutoffIso(workspace.retention_days);
+    const runRows = await query(
+      `select r.id, r.project_id,
+              (select count(*)::int from artifacts a where a.run_id = r.id) as artifact_count
+       from runs r
+       where r.workspace_id = $1
+         and r.finished_at is not null
+         and coalesce(r.finished_at, r.created_at) < $2::timestamptz`,
+      [workspace.id, cutoff]
+    );
+
+    if (!runRows.rows.length) continue;
+
+    await query(
+      `delete from runs
+       where id = any($1::uuid[])`,
+      [runRows.rows.map((row) => row.id)]
+    );
+
+    for (const runRow of runRows.rows) {
+      await recordRetentionAudit(workspace.id, runRow, cutoff);
+    }
+  }
+}
+
 console.log('[worker] webhook worker started');
 setInterval(() => {
   tick().catch((err) => {
     console.error('[worker] tick error', err);
   });
 }, POLL_MS);
+
+console.log('[worker] retention worker', ENABLE_RETENTION_WORKER ? 'enabled' : 'disabled');
+setInterval(() => {
+  retentionTick().catch((err) => {
+    console.error('[worker] retention tick error', err);
+  });
+}, RETENTION_WORKER_POLL_MS);
 
 process.on('SIGTERM', async () => {
   await pool.end();

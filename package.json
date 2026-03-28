@@ -26,6 +26,8 @@
     "smoke:webhooks:suite": "node scripts/smoke-webhooks-suite.mjs",
     "smoke:webhooks:clear-secret": "node scripts/smoke-webhooks-clear-secret.mjs",
     "smoke:webhooks:disable-after-queue": "node scripts/smoke-webhooks-disable-after-queue.mjs",
-    "smoke:webhooks:route-contract": "node scripts/smoke-webhooks-route-contract.mjs"
+    "smoke:webhooks:route-contract": "node scripts/smoke-webhooks-route-contract.mjs",
+    "smoke:auth-explorer": "node scripts/smoke-auth-explorer.mjs",
+    "smoke:notifications-retention": "node scripts/smoke-notifications-retention.mjs"
   }
 }

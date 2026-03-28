@@ -48,6 +48,14 @@ jobs:
       - name: End-to-end smoke
         run: npm run smoke:all
 
+      - name: Node syntax checks
+        run: |
+          node --check apps/api/src/index.js
+          node --check apps/worker/src/index.js
+          node --check apps/ingest/src/index.js
+          node --check scripts/smoke-auth-explorer.mjs
+          node --check scripts/smoke-notifications-retention.mjs
+
       - name: Webhook route contract
         if: env.RUN_WEBHOOK_SMOKES == '1'
         run: npm run smoke:webhooks:route-contract
@@ -67,6 +75,18 @@ jobs:
       - name: Webhook dead-letter auth
         if: env.RUN_WEBHOOK_SMOKES == '1'
         run: npm run smoke:webhooks:dead:auth
+
+      - name: Auth explorer smoke
+        env:
+          LOCAL_AUTH_REQUIRED: '1'
+          REQUIRE_WORKSPACE_AUTH: '1'
+        run: npm run smoke:auth-explorer
+
+      - name: Notifications and retention smoke
+        env:
+          LOCAL_AUTH_REQUIRED: '1'
+          REQUIRE_WORKSPACE_AUTH: '1'
+        run: npm run smoke:notifications-retention
 
       - name: Upload webhook artifacts
         if: always()
