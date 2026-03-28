@@ -502,15 +502,25 @@ function formatNotificationPayload({ channel, runBundle, workspaceId }) {
     return { channel, payload: { text: 'No run payload available' } };
   }
 
+  const normalizedBundle = {
+    run: runBundle.run || runBundle.item,
+    summary: runBundle.summary,
+    failures: runBundle.failures || []
+  };
+
+  if (!normalizedBundle.run) {
+    throw new Error('run_bundle_missing_run');
+  }
+
   if (channel === 'discord') {
-    return { channel, payload: buildDiscordPayload({ ...runBundle, workspaceId }) };
+    return { channel, payload: buildDiscordPayload({ ...normalizedBundle, workspaceId }) };
   }
 
   if (channel === 'github-pr') {
-    return { channel, payload: buildPrFeedbackPayload({ ...runBundle, workspaceId }) };
+    return { channel, payload: buildPrFeedbackPayload({ ...normalizedBundle, workspaceId }) };
   }
 
-  return { channel: 'slack', payload: buildSlackPayload({ ...runBundle, workspaceId }) };
+  return { channel: 'slack', payload: buildSlackPayload({ ...normalizedBundle, workspaceId }) };
 }
 
 async function queueWebhookFanout({ workspaceId, runId = null, eventType, payload }) {
