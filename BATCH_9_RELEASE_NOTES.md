@@ -16,6 +16,9 @@
 - `09faf51` Clean duplicate auth assertions and align release notes
 - `c9d7868` Complete auth-negative lane acceptance assertions
 - `779fe53` Persist artifactPath in webhook smoke artifact files
+- `6328037` Align suite artifact self-path and tighten auth acceptance semantics
+- `b6dcc20` Resolve smoke helper auth reference and intermediary release notes
+- `baa64ab` Include artifactPath inside suite JSON
 
 ## Commands
 ```bash
