@@ -79,6 +79,26 @@ async function patchEndpoint(endpointId, patch) {
   }, apiAuthToken);
 }
 
+
+async function assertApiPatchContract(endpointId) {
+  const res = await fetch(`${apiBase}/v1/webhook-endpoints/${endpointId}`, {
+    method: 'PATCH',
+    headers: {
+      'content-type': 'application/json',
+      ...(apiAuthToken ? { authorization: `Bearer ${apiAuthToken}` } : {})
+    },
+    body: JSON.stringify({})
+  });
+  const text = await res.text();
+  let body;
+  try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
+  if (res.status !== 400) {
+    throw new Error(
+      `webhook PATCH contract preflight expected 400 for empty body, got ${res.status}. Likely stale API runtime/image. Rebuild api/ingest/worker from latest source and retry. response=${JSON.stringify(body)}`
+    );
+  }
+}
+
 async function disableEndpoint(endpointId) {
   return jsonFetch(`${apiBase}/v1/webhook-endpoints/${endpointId}`, {
     method: 'PATCH',
@@ -118,6 +138,8 @@ try {
   const endpoint = await createEndpoint(workspaceId, target, 'run.finished', 'clear-secret-smoke');
   endpointId = endpoint?.item?.id;
   if (!endpointId) throw new Error('failed to create endpoint');
+
+  await assertApiPatchContract(endpointId);
 
   const runId1 = crypto.randomUUID();
   await postIngest('run.started', { runId: runId1, workspaceId, projectId, branch: 'main', commitSha: 'secret-on', ciProvider: 'local' });
