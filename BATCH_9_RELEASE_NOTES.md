@@ -12,6 +12,9 @@
 - `be70c3c` Add Batch 9 release notes
 - `0e26dfd` Fix smoke helper auth reference and intermediary release notes
 - `9b6c1f3` Finalize Batch 9 notes and auth-negative preflight
+- `37ee8ef` Strengthen negative-auth lane and lock cleanup route behavior
+- `09faf51` Clean duplicate auth assertions and align release notes
+- `c9d7868` Complete auth-negative lane acceptance assertions
 
 ## Commands
 ```bash
@@ -46,6 +49,7 @@ The following were observed on local runtime during Batch 9 execution:
 - `smoke:webhooks:disable-after-queue` passed
 - `smoke:webhooks:auth` passed with configured tokens
 - `smoke:webhooks:dead:auth` passed with configured tokens
+- `smoke:webhooks:auth:negative` passed with configured tokens and artifact output
 
 Artifacts:
 - `webhook-smoke-suite-<timestamp>.json`

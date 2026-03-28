@@ -36,8 +36,8 @@ async function checkGoodAuth({ name, url, method = 'GET', body, tokenType }) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   };
   const good = await fetchJsonWithStatus(url, init, goodToken);
-  if (good.status === 401) {
-    throw new Error(`${name} expected authenticated token to be accepted, got ${good.status}`);
+  if (good.status === 401 || good.status >= 500) {
+    throw new Error(`${name} expected authenticated token to be accepted without auth-layer rejection, got ${good.status}`);
   }
   return {
     name,
