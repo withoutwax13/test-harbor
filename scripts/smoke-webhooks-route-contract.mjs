@@ -26,20 +26,17 @@ async function maybeWriteArtifact(payload) {
   return file;
 }
 
-const seeded = await seedWebhookWorkspaceProject({
-  organizationName: 'Webhook Route Contract Org',
-  workspaceName: 'Webhook Route Contract Workspace',
-  projectName: 'Webhook Route Contract Project'
-});
-
-let endpointId = null;
 const call = (url, init = {}) => fetchJsonWithStatus(url, init, apiAuthToken);
+const checks = [];
+
+let seeded = null;
+let endpointId = null;
 
 try {
-  const checks = [];
-
   if (!apiAuthToken) {
-    const unauthList = await call(`${apiBase}/v1/webhook-endpoints?workspaceId=${seeded.workspaceId}`);
+    const probeWorkspaceId = '00000000-0000-0000-0000-000000000000';
+
+    const unauthList = await call(`${apiBase}/v1/webhook-endpoints?workspaceId=${probeWorkspaceId}`);
     checks.push({
       name: 'authRequired.listEndpoints',
       expectedStatus: 401,
@@ -50,7 +47,7 @@ try {
     const unauthCreate = await call(`${apiBase}/v1/webhook-endpoints`, {
       method: 'POST',
       body: JSON.stringify({
-        workspaceId: seeded.workspaceId,
+        workspaceId: probeWorkspaceId,
         type: 'run.finished',
         targetUrl: 'http://127.0.0.1:9/hook'
       })
@@ -61,7 +58,21 @@ try {
       gotStatus: unauthCreate.status,
       pass: unauthCreate.status === 401
     });
+
+    const unauthDeliveries = await call(`${apiBase}/v1/webhook-deliveries?workspaceId=${probeWorkspaceId}`);
+    checks.push({
+      name: 'authRequired.listDeliveries',
+      expectedStatus: 401,
+      gotStatus: unauthDeliveries.status,
+      pass: unauthDeliveries.status === 401
+    });
   } else {
+    seeded = await seedWebhookWorkspaceProject({
+      organizationName: 'Webhook Route Contract Org',
+      workspaceName: 'Webhook Route Contract Workspace',
+      projectName: 'Webhook Route Contract Project'
+    });
+
     const missingWorkspace = await call(`${apiBase}/v1/webhook-endpoints`);
     checks.push({
       name: 'listEndpoints.workspaceRequired',
@@ -179,14 +190,14 @@ try {
     generatedAt: new Date().toISOString(),
     cleanupMode: cleanupSettings.seededDataMode,
     authMode,
-    workspaceId: seeded.workspaceId,
-    projectId: seeded.projectId,
+    workspaceId: seeded?.workspaceId || null,
+    projectId: seeded?.projectId || null,
     endpointId,
     checks,
     failedChecks: failed,
     note: apiAuthToken
       ? 'validated webhook route contracts with authenticated business semantics'
-      : 'API_AUTH_TOKEN not set: validated auth-required route guards only'
+      : 'API_AUTH_TOKEN not set: validated auth-required guards without seeding'
   };
 
   const artifactPath = await maybeWriteArtifact(output);
@@ -197,16 +208,18 @@ try {
   }
   console.log(JSON.stringify(withPath, null, 2));
 } finally {
-  await cleanupWebhookSmokeSeededData({
-    organizationId: seeded.organizationId,
-    workspaceId: seeded.workspaceId,
-    projectId: seeded.projectId,
-    endpointId,
-    disableEndpoint: async (id) => {
-      await fetchJsonWithStatus(`${apiBase}/v1/webhook-endpoints/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ enabled: false })
-      }, apiAuthToken);
-    }
-  });
+  if (seeded) {
+    await cleanupWebhookSmokeSeededData({
+      organizationId: seeded.organizationId,
+      workspaceId: seeded.workspaceId,
+      projectId: seeded.projectId,
+      endpointId,
+      disableEndpoint: async (id) => {
+        await fetchJsonWithStatus(`${apiBase}/v1/webhook-endpoints/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ enabled: false })
+        }, apiAuthToken);
+      }
+    });
+  }
 }
