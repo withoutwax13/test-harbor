@@ -15,6 +15,7 @@
 - `37ee8ef` Strengthen negative-auth lane and lock cleanup route behavior
 - `09faf51` Clean duplicate auth assertions and align release notes
 - `c9d7868` Complete auth-negative lane acceptance assertions
+- `779fe53` Persist artifactPath in webhook smoke artifact files
 
 ## Commands
 ```bash
@@ -52,6 +53,5 @@ The following were observed on local runtime during Batch 9 execution:
 - `smoke:webhooks:auth:negative` passed with configured tokens and artifact output
 
 Artifacts:
-- `webhook-smoke-suite-<timestamp>.json`
-- `webhook-smoke-clear-secret-<timestamp>.json` (if enabled)
+- `webhook-smoke-suite-<timestamp>.json` (contains nested clear-secret results when enabled)
 - `webhook-smoke-disable-after-queue-<timestamp>.json` (if enabled)
