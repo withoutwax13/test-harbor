@@ -51,7 +51,7 @@ Validated lanes:
 - `npm run smoke:webhooks` -> delivered path with retries plus signature header
 - `npm run smoke:webhooks:dead` -> dead-letter path at max attempts
 - `npm run smoke:webhooks:suite`
-- `npm run smoke:webhooks:route-contract` (Batch 10 API route contract parity: webhook CRUD + deliveries query semantics) -> delivered + dead + disable-after-queue + clear-secret, with combined JSON artifact
+- `npm run smoke:webhooks:route-contract` (Batch 10 API route contract parity for webhook CRUD + deliveries query semantics; with token it validates business semantics, without token it validates auth-required guards)
 - `npm run smoke:webhooks:auth:negative` -> missing/invalid bearer token checks across webhook API and ingest routes
 - `npm run smoke:webhooks:auth` -> auth-enabled delivered path
 - `npm run smoke:webhooks:dead:auth` -> auth-enabled dead-letter path
