@@ -46,6 +46,7 @@ const combined = {
   ok: true,
   generatedAt: new Date().toISOString(),
   cleanupMode,
+  artifactPath: suitePath,
   delivered,
   dead,
   disableAfterQueue,
