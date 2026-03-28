@@ -11,6 +11,7 @@ const MAX_ATTEMPTS = Number(process.env.WEBHOOK_MAX_ATTEMPTS || 5);
 const BASE_BACKOFF_MS = Number(process.env.WEBHOOK_BASE_BACKOFF_MS || 2000);
 const ENABLE_RETENTION_WORKER = process.env.ENABLE_RETENTION_WORKER !== '0';
 const RETENTION_WORKER_POLL_MS = Number(process.env.RETENTION_WORKER_POLL_MS || 30000);
+const WORKER_HEARTBEAT_MS = Number(process.env.WORKER_HEARTBEAT_MS || 10000);
 
 async function query(sql, params = []) {
   const client = await pool.connect();
@@ -19,6 +20,18 @@ async function query(sql, params = []) {
   } finally {
     client.release();
   }
+}
+
+async function heartbeat(meta = {}) {
+  await query(
+    `insert into service_heartbeats(service_name, last_seen_at, meta_json, updated_at)
+     values ('worker', now(), $1::jsonb, now())
+     on conflict (service_name)
+     do update set last_seen_at = excluded.last_seen_at,
+                   meta_json = excluded.meta_json,
+                   updated_at = excluded.updated_at`,
+    [JSON.stringify(meta)]
+  );
 }
 
 function retryDelayMs(attemptCount) {
@@ -191,6 +204,7 @@ async function deliverOne(delivery) {
 }
 
 async function tick() {
+  await heartbeat({ lane: 'webhook', batchSize: MAX_BATCH });
   const claimed = await claimDeliveries(MAX_BATCH);
   if (!claimed.length) return;
 
@@ -221,6 +235,7 @@ async function recordRetentionAudit(workspaceId, runRow, cutoff) {
 
 async function retentionTick() {
   if (!ENABLE_RETENTION_WORKER) return;
+  await heartbeat({ lane: 'retention', pollMs: RETENTION_WORKER_POLL_MS });
 
   const workspaceRows = await query(
     `select id, retention_days
@@ -255,6 +270,9 @@ async function retentionTick() {
 }
 
 console.log('[worker] webhook worker started');
+heartbeat({ lane: 'startup', pollMs: POLL_MS, retentionPollMs: RETENTION_WORKER_POLL_MS }).catch((err) => {
+  console.error('[worker] heartbeat error', err);
+});
 setInterval(() => {
   tick().catch((err) => {
     console.error('[worker] tick error', err);
@@ -267,6 +285,11 @@ setInterval(() => {
     console.error('[worker] retention tick error', err);
   });
 }, RETENTION_WORKER_POLL_MS);
+setInterval(() => {
+  heartbeat({ lane: 'interval', pollMs: POLL_MS, retentionPollMs: RETENTION_WORKER_POLL_MS }).catch((err) => {
+    console.error('[worker] heartbeat interval error', err);
+  });
+}, WORKER_HEARTBEAT_MS);
 
 process.on('SIGTERM', async () => {
   await pool.end();

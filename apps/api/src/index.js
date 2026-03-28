@@ -20,6 +20,9 @@ const STORAGE_PREFIX = (process.env.STORAGE_PREFIX || 'artifacts').replace(/^\/+
 const ARTIFACT_PROXY_MODE = process.env.ARTIFACT_PROXY_MODE || 'json';
 const DEFAULT_ANALYTICS_SEED = process.env.ANALYTICS_SEED || 'testharbor-v1';
 const ENABLE_AUDIT_LOGS = process.env.ENABLE_AUDIT_LOGS !== '0';
+const INGEST_BASE_URL = (process.env.INGEST_BASE_URL || 'http://localhost:4010').replace(/\/+$/, '');
+const SYSTEM_STATUS_TIMEOUT_MS = Number(process.env.SYSTEM_STATUS_TIMEOUT_MS || 4000);
+const WORKER_HEARTBEAT_STALE_SEC = Number(process.env.WORKER_HEARTBEAT_STALE_SEC || 60);
 
 const ROLE_RANK = {
   viewer: 0,
@@ -136,6 +139,30 @@ function ensureArray(value) {
   return [];
 }
 
+function normalizeBaseUrl(url) {
+  return String(url || '').replace(/\/+$/, '');
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = SYSTEM_STATUS_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    const text = await res.text();
+    let body = {};
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      body = { raw: text };
+    }
+    return { ok: res.ok, status: res.status, body };
+  } catch (error) {
+    return { ok: false, status: 0, body: { error: String(error?.message || error) } };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function recordAuditLog({ workspaceId, actorUserId = null, action, entityType, entityId, meta = null }) {
   if (!ENABLE_AUDIT_LOGS || !workspaceId) return;
   await query(
@@ -143,6 +170,84 @@ async function recordAuditLog({ workspaceId, actorUserId = null, action, entityT
      values ($1, $2, $3, $4, $5, $6::jsonb)`,
     [workspaceId, actorUserId, action, entityType, String(entityId), meta ? JSON.stringify(meta) : null]
   );
+}
+
+async function readWorkerStatus() {
+  const heartbeatRes = await query(
+    `select service_name, last_seen_at, meta_json, updated_at
+     from service_heartbeats
+     where service_name = 'worker'`
+  );
+  const deliveryRes = await query(
+    `select
+       count(*) filter (where status = 'queued')::int as queued,
+       count(*) filter (where status = 'retry_scheduled')::int as retry_scheduled,
+       count(*) filter (where status = 'delivering')::int as delivering,
+       count(*) filter (where status = 'dead')::int as dead
+     from webhook_deliveries`
+  );
+  const heartbeat = heartbeatRes.rows[0] || null;
+  const counts = deliveryRes.rows[0] || { queued: 0, retry_scheduled: 0, delivering: 0, dead: 0 };
+
+  if (!heartbeat) {
+    return {
+      ok: false,
+      state: 'missing',
+      staleSeconds: null,
+      heartbeat: null,
+      queue: counts
+    };
+  }
+
+  const staleSeconds = Math.max(0, Math.floor((Date.now() - new Date(heartbeat.last_seen_at).getTime()) / 1000));
+  return {
+    ok: staleSeconds <= WORKER_HEARTBEAT_STALE_SEC,
+    state: staleSeconds <= WORKER_HEARTBEAT_STALE_SEC ? 'up' : 'stale',
+    staleSeconds,
+    heartbeat,
+    queue: counts
+  };
+}
+
+async function buildSystemStatus() {
+  let db = 'down';
+  try {
+    await query('select 1');
+    db = 'up';
+  } catch {
+    db = 'down';
+  }
+
+  const ingest = await fetchJsonWithTimeout(`${normalizeBaseUrl(INGEST_BASE_URL)}/healthz`);
+  const worker = await readWorkerStatus();
+  const recentRuns = await query(
+    `select count(*)::int as count
+     from runs
+     where created_at >= now() - interval '24 hours'`
+  );
+
+  return {
+    ok: db === 'up' && ingest.ok && worker.ok,
+    generatedAt: new Date().toISOString(),
+    services: {
+      api: {
+        ok: db === 'up',
+        state: db === 'up' ? 'up' : 'down',
+        db,
+        storageBackend: STORAGE_BACKEND
+      },
+      ingest: {
+        ok: ingest.ok && ingest.body?.ok === true,
+        state: ingest.ok && ingest.body?.ok === true ? 'up' : 'down',
+        baseUrl: INGEST_BASE_URL,
+        response: ingest.body
+      },
+      worker
+    },
+    metrics: {
+      recentRuns24h: Number(recentRuns.rows[0]?.count || 0)
+    }
+  };
 }
 
 async function getUserById(userId) {
@@ -862,6 +967,13 @@ app.get('/healthz', async () => {
     db,
     storageBackend: STORAGE_BACKEND
   };
+});
+
+app.get('/v1/system/status', async (request, reply) => {
+  if (!request.auth?.isService && !request.auth?.userId) {
+    return reply.code(401).send({ error: 'unauthorized' });
+  }
+  return buildSystemStatus();
 });
 
 app.post('/v1/auth/login', async (request, reply) => {
