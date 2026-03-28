@@ -4,7 +4,10 @@ import path from 'node:path';
 import {
   artifactStamp,
   assertWebhookApiRoutesAvailable,
-  fetchJsonWithStatus
+  cleanupWebhookSmokeSeededData,
+  fetchJsonWithStatus,
+  getWebhookSmokeCleanupSettings,
+  seedWebhookWorkspaceProject
 } from './webhook-smoke-helpers.mjs';
 
 const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
@@ -42,7 +45,8 @@ async function checkGoodAuth({ name, url, method = 'GET', body, tokenType }) {
   return {
     name,
     tokenType,
-    goodStatus: good.status
+    goodStatus: good.status,
+    body: good.body
   };
 }
 
@@ -72,9 +76,13 @@ async function checkCase({ name, url, method = 'GET', body, tokenType, missingEx
   };
 }
 
-const dummyWorkspaceId = '00000000-0000-0000-0000-000000000000';
-const dummyEndpointId = '00000000-0000-0000-0000-000000000001';
+const cleanupSettings = getWebhookSmokeCleanupSettings();
+const seeded = await seedWebhookWorkspaceProject({ suffix: `auth-negative-${Date.now()}` });
+const dummyWorkspaceId = seeded.workspaceId;
+const dummyEndpointId = seeded.endpointId || '00000000-0000-0000-0000-000000000001';
 const results = [];
+
+try {
 
 results.push(await checkGoodAuth({
   name: 'api.listWebhookEndpoints',
@@ -93,13 +101,15 @@ const createPayload = {
   targetUrl: 'http://127.0.0.1:9/hook',
   enabled: true
 };
-results.push(await checkGoodAuth({
+const createGood = await checkGoodAuth({
   name: 'api.createWebhookEndpoint',
   url: `${apiBase}/v1/webhook-endpoints`,
   method: 'POST',
   body: createPayload,
   tokenType: 'api'
-}));
+});
+results.push(createGood);
+const createdEndpointId = createGood.body?.id || dummyEndpointId;
 results.push(await checkCase({
   name: 'api.createWebhookEndpoint',
   url: `${apiBase}/v1/webhook-endpoints`,
@@ -110,14 +120,14 @@ results.push(await checkCase({
 
 results.push(await checkGoodAuth({
   name: 'api.patchWebhookEndpoint',
-  url: `${apiBase}/v1/webhook-endpoints/${dummyEndpointId}`,
+  url: `${apiBase}/v1/webhook-endpoints/${createdEndpointId}`,
   method: 'PATCH',
   body: { enabled: false },
   tokenType: 'api'
 }));
 results.push(await checkCase({
   name: 'api.patchWebhookEndpoint',
-  url: `${apiBase}/v1/webhook-endpoints/${dummyEndpointId}`,
+  url: `${apiBase}/v1/webhook-endpoints/${createdEndpointId}`,
   method: 'PATCH',
   body: { enabled: false },
   tokenType: 'api'
@@ -125,13 +135,13 @@ results.push(await checkCase({
 
 results.push(await checkGoodAuth({
   name: 'api.deleteWebhookEndpoint',
-  url: `${apiBase}/v1/webhook-endpoints/${dummyEndpointId}`,
+  url: `${apiBase}/v1/webhook-endpoints/${createdEndpointId}`,
   method: 'DELETE',
   tokenType: 'api'
 }));
 results.push(await checkCase({
   name: 'api.deleteWebhookEndpoint',
-  url: `${apiBase}/v1/webhook-endpoints/${dummyEndpointId}`,
+  url: `${apiBase}/v1/webhook-endpoints/${createdEndpointId}`,
   method: 'DELETE',
   tokenType: 'api'
 }));
@@ -174,6 +184,9 @@ results.push(await checkCase({
 const output = {
   ok: true,
   generatedAt: new Date().toISOString(),
+  workspaceId: dummyWorkspaceId,
+  endpointId: typeof createdEndpointId !== 'undefined' ? createdEndpointId : null,
+  cleanupMode: cleanupSettings.seededDataMode,
   results
 };
 const artifactPath = await maybeWriteArtifact(output);
@@ -183,4 +196,14 @@ if (artifactPath) {
   console.log(JSON.stringify(withPath, null, 2));
 } else {
   console.log(JSON.stringify(output, null, 2));
+}
+
+} finally {
+  await cleanupWebhookSmokeSeededData({
+    organizationId: seeded.organizationId,
+    workspaceId: seeded.workspaceId,
+    projectId: seeded.projectId,
+    endpointId: typeof createdEndpointId !== 'undefined' ? createdEndpointId : null,
+    cleanupSettings
+  });
 }

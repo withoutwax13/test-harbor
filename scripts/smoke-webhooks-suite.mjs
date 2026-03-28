@@ -42,6 +42,7 @@ const dead = await runNode('scripts/smoke-webhooks-dead.mjs');
 const clearSecret = includeClearSecret ? await runNode('scripts/smoke-webhooks-clear-secret.mjs') : null;
 const disableAfterQueue = await runNode('scripts/smoke-webhooks-disable-after-queue.mjs');
 
+const suitePath = path.join(outDir, `webhook-smoke-suite-${stamp}.json`);
 const combined = {
   ok: true,
   generatedAt: new Date().toISOString(),
@@ -52,7 +53,6 @@ const combined = {
   disableAfterQueue,
   ...(includeClearSecret ? { clearSecret } : {})
 };
-const suitePath = path.join(outDir, `webhook-smoke-suite-${stamp}.json`);
 await fs.writeFile(suitePath, JSON.stringify(combined, null, 2));
 console.log(JSON.stringify({
   ok: true,
