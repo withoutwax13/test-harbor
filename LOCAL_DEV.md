@@ -14,7 +14,7 @@
 ```
 
 This runs:
-1. `docker compose up -d postgres redis minio ingest api`
+1. `docker compose up -d postgres redis minio ingest api worker`
 2. `npm run db:migrate:container`
 3. `npm run seed:local`
 4. `npm run smoke:all`
@@ -22,7 +22,7 @@ This runs:
 ## Manual fallback
 
 ```bash
-docker compose up -d postgres redis minio ingest api
+docker compose up -d postgres redis minio ingest api worker
 npm run db:migrate:container
 npm run seed:local
 npm run smoke:all
@@ -51,6 +51,7 @@ Validated lanes:
 - `npm run smoke:webhooks` -> delivered path with retries plus signature header
 - `npm run smoke:webhooks:dead` -> dead-letter path at max attempts
 - `npm run smoke:webhooks:suite` -> delivered + dead + disable-after-queue + clear-secret, with combined JSON artifact
+- `npm run smoke:webhooks:auth:negative` -> missing/invalid bearer token checks across webhook API and ingest routes
 - `npm run smoke:webhooks:auth` -> auth-enabled delivered path
 - `npm run smoke:webhooks:dead:auth` -> auth-enabled dead-letter path
 
@@ -61,17 +62,22 @@ Runtime guardrails:
 Artifact persistence:
 - Set `WEBHOOK_ARTIFACT_DIR` to retain per-run JSON artifacts.
 - Suite default artifact directory: `artifacts/webhooks`
+- Poll timing metrics are included in the per-run JSON artifacts for timeout tuning.
 - Skip the clear-secret leg if needed: `WEBHOOK_INCLUDE_CLEAR_SECRET=0 npm run smoke:webhooks:suite`
 
 Teardown and data hygiene:
 - Default-safe mode is `WEBHOOK_SEEDED_DATA_MODE=keep`. The harness disables the created endpoint on exit, but leaves the seeded workspace/project rows intact for inspection.
-- Opt into full teardown with `WEBHOOK_SEEDED_DATA_MODE=teardown`. In that mode the harness deletes the seeded webhook endpoint, project, and workspace tree on exit (organization rows may remain if shared by other workspace slugs).
+- Opt into full teardown with `WEBHOOK_SEEDED_DATA_MODE=teardown`. In that mode the harness deletes the seeded webhook endpoint, project, and workspace tree on exit.
+- The seeded webhook runs create one organization per run with a `webhook-org-*` slug and one `webhook-workspace-*` workspace beneath it.
+- Optional org cleanup is disabled by default. To allow bounded cascade cleanup for isolated smoke orgs only, set both `ALLOW_SMOKE_ORG_CLEANUP=1` on the API service and `WEBHOOK_DELETE_SMOKE_ORG_ON_EXIT=1` in the smoke environment.
+- The safe org cleanup path only applies to a single-workspace `webhook-org-*` tree whose workspace and project slugs also match the webhook smoke prefixes. It will reject shared or non-smoke organizations.
 - `WEBHOOK_DISABLE_ENDPOINT_ON_EXIT=0` still opts out of the endpoint-disable fallback when you need to inspect the live endpoint row after a run.
 
 Green closure evidence snippet:
 
 ```bash
 $ WEBHOOK_ARTIFACT_DIR=artifacts/webhooks WEBHOOK_SEEDED_DATA_MODE=teardown npm run smoke:webhooks:suite
+$ WEBHOOK_ARTIFACT_DIR=artifacts/webhooks npm run smoke:webhooks:auth:negative
 $ npm run smoke:webhooks:auth
 $ npm run smoke:webhooks:dead:auth
 ```
@@ -102,4 +108,4 @@ Troubleshooting matrix:
 | `webhook PATCH contract preflight expected 400 ...` | API runtime does not include the latest webhook patch validation | Rebuild `api`, `ingest`, and `worker`, then rerun `npm run smoke:webhooks:clear-secret` or the suite |
 | `401 unauthorized` in auth lanes | Missing or mismatched `API_AUTH_TOKEN` / `INGEST_AUTH_TOKEN` | Export matching bearer tokens for API and ingest before running auth smokes |
 | `timeout waiting for webhook delivery terminal state` | Worker not running, stale runtime, or retry window too short | Check `docker compose logs --tail=200 api ingest worker`; increase `WEBHOOK_WAIT_TIMEOUT_MS` only after confirming current images |
-| Seeded webhook smoke rows remain after run | Running default-safe mode | Use `WEBHOOK_SEEDED_DATA_MODE=teardown` when you want the seeded workspace/project tree removed automatically |
+| Seeded webhook smoke rows remain after run | Running default-safe mode or org cleanup opt-in is off | Use `WEBHOOK_SEEDED_DATA_MODE=teardown`; add `ALLOW_SMOKE_ORG_CLEANUP=1` plus `WEBHOOK_DELETE_SMOKE_ORG_ON_EXIT=1` only for isolated smoke org cleanup |

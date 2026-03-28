@@ -81,7 +81,13 @@ app.post('/v1/workspaces', async (request, reply) => {
     [org.rows[0].id, name, slug, timezone, retentionDays]
   );
 
-  return reply.code(201).send({ item: ws.rows[0] });
+  return reply.code(201).send({
+    item: {
+      ...ws.rows[0],
+      organization_id: org.rows[0].id,
+      organization_slug: org.rows[0].slug
+    }
+  });
 });
 
 app.get('/v1/projects', async (request, reply) => {
@@ -399,6 +405,80 @@ app.get('/v1/runs/:id', async (request, reply) => {
     tests: tests.rows,
     artifacts: artifacts.rows
   };
+});
+
+app.delete('/v1/organizations/:id/smoke-cleanup', async (request, reply) => {
+  if (process.env.ALLOW_SMOKE_ORG_CLEANUP !== '1') {
+    return reply.code(403).send({ error: 'smoke_org_cleanup_disabled' });
+  }
+
+  if (request.query?.confirm !== 'delete-smoke-organization') {
+    return reply.code(400).send({ error: 'confirm=delete-smoke-organization is required' });
+  }
+
+  const { id } = request.params;
+  const orgRes = await query(
+    `select id, slug, name, created_at
+     from organizations
+     where id = $1`,
+    [id]
+  );
+  if (!orgRes.rows.length) return reply.code(404).send({ error: 'not_found' });
+
+  const organization = orgRes.rows[0];
+  if (!/^webhook-org-\d[\da-z-]*$/.test(organization.slug)) {
+    return reply.code(400).send({ error: 'organization_not_eligible_for_smoke_cleanup', slug: organization.slug });
+  }
+
+  const workspaceRes = await query(
+    `select id, slug
+     from workspaces
+     where organization_id = $1
+     order by created_at asc`,
+    [id]
+  );
+  if (workspaceRes.rows.length !== 1) {
+    return reply.code(400).send({
+      error: 'organization_not_isolated',
+      workspaceCount: workspaceRes.rows.length
+    });
+  }
+
+  const workspace = workspaceRes.rows[0];
+  if (!/^webhook-workspace-\d[\da-z-]*$/.test(workspace.slug)) {
+    return reply.code(400).send({ error: 'workspace_not_eligible_for_smoke_cleanup', slug: workspace.slug });
+  }
+
+  const projectRes = await query(
+    `select id, slug
+     from projects
+     where workspace_id = $1
+     order by created_at asc`,
+    [workspace.id]
+  );
+  if (projectRes.rows.length > 3) {
+    return reply.code(400).send({
+      error: 'organization_not_bounded',
+      projectCount: projectRes.rows.length
+    });
+  }
+  if (projectRes.rows.some((project) => !/^webhook-project-\d[\da-z-]*$/.test(project.slug))) {
+    return reply.code(400).send({ error: 'project_not_eligible_for_smoke_cleanup' });
+  }
+
+  await query(
+    `delete from organizations
+     where id = $1`,
+    [id]
+  );
+
+  return reply.code(200).send({
+    ok: true,
+    organizationId: id,
+    organizationSlug: organization.slug,
+    deletedWorkspaceId: workspace.id,
+    deletedProjectCount: projectRes.rows.length
+  });
 });
 
 app.delete('/v1/workspaces/:id', async (request, reply) => {

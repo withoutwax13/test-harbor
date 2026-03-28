@@ -12,10 +12,13 @@ jobs:
     env:
       API_AUTH_TOKEN: ci-api-token
       INGEST_AUTH_TOKEN: ci-ingest-token
+      ALLOW_SMOKE_ORG_CLEANUP: '1'
       API_BASE_URL: http://localhost:4000
       INGEST_BASE_URL: http://localhost:4010
       WEBHOOK_ARTIFACT_DIR: artifacts/webhooks
       WEBHOOK_SEEDED_DATA_MODE: teardown
+      WEBHOOK_DELETE_SMOKE_ORG_ON_EXIT: '1'
+      RUN_WEBHOOK_SMOKES: '1'
 
     steps:
       - name: Checkout
@@ -46,13 +49,28 @@ jobs:
         run: npm run smoke:all
 
       - name: Webhook smoke suite
+        if: env.RUN_WEBHOOK_SMOKES == '1'
         run: npm run smoke:webhooks:suite
 
+      - name: Webhook negative auth
+        if: env.RUN_WEBHOOK_SMOKES == '1'
+        run: npm run smoke:webhooks:auth:negative
+
       - name: Webhook smoke auth
+        if: env.RUN_WEBHOOK_SMOKES == '1'
         run: npm run smoke:webhooks:auth
 
       - name: Webhook dead-letter auth
+        if: env.RUN_WEBHOOK_SMOKES == '1'
         run: npm run smoke:webhooks:dead:auth
+
+      - name: Upload webhook artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webhook-smoke-artifacts
+          path: artifacts/webhooks
+          if-no-files-found: warn
 
       - name: Print compose logs on failure
         if: failure()
