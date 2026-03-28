@@ -38,11 +38,57 @@ npm run smoke:all
 Set these in `.env` to enforce bearer auth:
 - `API_AUTH_TOKEN`
 - `INGEST_AUTH_TOKEN`
+- `LOCAL_AUTH_REQUIRED=1`
+- `REQUIRE_WORKSPACE_AUTH=1`
+- `LOCAL_AUTH_SECRET=change-me`
 
-When set, all `/v1/*` routes require `Authorization: Bearer <token>`.
-`/healthz` remains open for liveness checks.
+When `API_AUTH_TOKEN` is set, `/v1/*` accepts either the service bearer token or a local-dev user token issued by `POST /v1/auth/login`.
+When `LOCAL_AUTH_REQUIRED=1`, local user auth is mandatory for API routes.
+When `REQUIRE_WORKSPACE_AUTH=1`, workspace-scoped routes also require membership and role checks (`owner`, `admin`, `member`, `viewer`).
+`/healthz`, `POST /v1/auth/login`, and signed artifact proxy URLs remain open for liveness and local artifact flows.
 
 - Full local bootstrap: `npm run smoke:bootstrap`
+
+## Batch 11-18 additions
+
+Key API lanes now available:
+- Auth and workspace guard lanes: `POST /v1/auth/login`, `GET /v1/me`, `POST /v1/workspaces/:id/members`
+- Artifact signing lanes: `POST /v1/artifacts/sign-upload`, `GET /v1/artifacts/:id/sign-download`
+- Explorer and analytics lanes: `GET /v1/runs/:runId/specs`, `GET /v1/spec-runs/:id/tests`, `GET /v1/tests/:testCaseId/history`, `GET /v1/analytics/flaky`, `GET /v1/analytics/failures/clusters`
+- Orchestrator and notification lanes: `POST /v1/orchestrator/plan`, `GET /v1/orchestrator/runs/:runId/shards`, `POST /v1/orchestrator/retry-failures/:runId`, `POST /v1/notifications/format`, `POST /v1/notifications/pr-feedback`, `POST /v1/notifications/test`
+- Retention and audit lanes: `POST /v1/retention/run`, `GET /v1/audit-logs`
+
+New smoke scripts:
+- `npm run smoke:auth-explorer`
+- `npm run smoke:notifications-retention`
+
+Recommended hardened local run:
+
+```bash
+export LOCAL_AUTH_REQUIRED=1
+export REQUIRE_WORKSPACE_AUTH=1
+export API_AUTH_TOKEN=local-api-token
+export INGEST_AUTH_TOKEN=local-ingest-token
+docker compose up -d postgres redis minio ingest api worker
+npm run db:migrate:container
+npm run smoke:auth-explorer
+npm run smoke:notifications-retention
+```
+
+## Artifact signing and storage portability
+
+Storage env toggles:
+- `STORAGE_BACKEND=minio|s3`
+- `STORAGE_BUCKET=testharbor`
+- `STORAGE_PREFIX=artifacts`
+- `STORAGE_PUBLIC_BASE_URL=http://localhost:4000`
+- `ARTIFACT_SIGN_TTL_SEC=900`
+- `ARTIFACT_PROXY_MODE=json`
+
+Current local mode is adapter-first:
+- `sign-upload` and `sign-download` persist grants in `artifact_access_tokens`
+- returned URLs are stable proxy contracts that validate the signed grant before acknowledging upload/download
+- MinIO/S3 portability is driven by the adapter env surface above, so local compose can stay on MinIO while deployment docs/scripts can switch to S3-compatible endpoints without changing API consumers
 
 
 ## Webhook smoke closure
