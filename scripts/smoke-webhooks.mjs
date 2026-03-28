@@ -92,10 +92,10 @@ async function seedWorkspaceProject() {
   return { workspaceId: ws.item.id, projectId: project.item.id };
 }
 
-async function createEndpoint(workspaceId, targetUrl, type) {
+async function createEndpoint(workspaceId, targetUrl, type, secret) {
   return jsonFetch(`${apiBase}/v1/webhook-endpoints`, {
     method: 'POST',
-    body: JSON.stringify({ workspaceId, type, targetUrl, enabled: true })
+    body: JSON.stringify({ workspaceId, type, targetUrl, secret, enabled: true })
   }, apiAuthToken);
 }
 
@@ -148,8 +148,9 @@ try {
   }
 
   const target = `http://${webhookTargetHost}:${mockPort}${mockPath}`;
+  const webhookSecret = 'smoke-secret';
 
-  await createEndpoint(workspaceId, target, 'run.finished');
+  await createEndpoint(workspaceId, target, 'run.finished', webhookSecret);
 
   const runId = crypto.randomUUID();
   await postIngest('run.started', {
@@ -197,6 +198,11 @@ try {
     throw new Error(`expected at least ${failCountBeforeSuccess + 1} attempts, got ${final.attempt_count}`);
   }
 
+  const signatureSeen = requests.some((r) => Boolean(r.headers['x-testharbor-signature']));
+  if (!signatureSeen) {
+    throw new Error('expected x-testharbor-signature header on at least one webhook request');
+  }
+
   console.log(JSON.stringify({
     ok: true,
     workspaceId,
@@ -205,6 +211,7 @@ try {
     target,
     webhookTargetHost,
     maxAttempts,
+    signatureSeen,
     mockReceived: received,
     finalDelivery: {
       id: final.id,
