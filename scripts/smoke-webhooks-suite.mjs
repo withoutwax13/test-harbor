@@ -53,4 +53,9 @@ const combined = {
 };
 const suitePath = path.join(outDir, `webhook-smoke-suite-${stamp}.json`);
 await fs.writeFile(suitePath, JSON.stringify(combined, null, 2));
-console.log(JSON.stringify({ ok: true, artifactPath: suitePath, includeClearSecret }, null, 2));
+console.log(JSON.stringify({
+  ok: true,
+  artifactPath: suitePath,
+  includeClearSecret,
+  artifactDirectory: outDir
+}, null, 2));

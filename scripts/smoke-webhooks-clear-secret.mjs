@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
 import {
+  pollUntil,
+  postIngestEvent,
+  seedWebhookWorkspaceProject,
   assertWebhookApiRoutesAvailable,
   cleanupWebhookSmokeSeededData,
   getWebhookSmokeCleanupSettings,
@@ -8,52 +11,13 @@ import {
 } from './webhook-smoke-helpers.mjs';
 
 const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
 const apiAuthToken = process.env.API_AUTH_TOKEN || '';
-const ingestAuthToken = process.env.INGEST_AUTH_TOKEN || '';
 
 const mockPort = Number(process.env.WEBHOOK_MOCK_PORT || 5099);
 const mockPath = process.env.WEBHOOK_MOCK_PATH || '/hook';
 const webhookTargetHost = process.env.WEBHOOK_TARGET_HOST || 'host.docker.internal';
 const waitTimeoutMs = Number(process.env.WEBHOOK_WAIT_TIMEOUT_MS || 45000);
 const cleanupSettings = getWebhookSmokeCleanupSettings();
-
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-
-async function postIngest(type, payload, idempotencyKey = crypto.randomUUID()) {
-  return jsonFetch(`${ingestBase}/v1/ingest/events`, {
-    method: 'POST',
-    body: JSON.stringify({ type, idempotencyKey, payload })
-  }, ingestAuthToken);
-}
-
-async function seedWorkspaceProject() {
-  const ws = await jsonFetch(`${apiBase}/v1/workspaces`, {
-    method: 'POST',
-    body: JSON.stringify({
-      organizationName: 'Webhook Org',
-      organizationSlug: `webhook-org-${Date.now()}`,
-      name: 'Webhook Workspace',
-      slug: `webhook-workspace-${Date.now()}`,
-      timezone: 'UTC',
-      retentionDays: 30
-    })
-  }, apiAuthToken);
-
-  const project = await jsonFetch(`${apiBase}/v1/projects`, {
-    method: 'POST',
-    body: JSON.stringify({
-      workspaceId: ws.item.id,
-      name: 'Webhook Project',
-      slug: `webhook-project-${Date.now()}`,
-      provider: 'github',
-      repoUrl: 'https://example.com/repo.git',
-      defaultBranch: 'main'
-    })
-  }, apiAuthToken);
-
-  return { workspaceId: ws.item.id, projectId: project.item.id };
-}
 
 async function createEndpoint(workspaceId, targetUrl, type, secret) {
   return jsonFetch(`${apiBase}/v1/webhook-endpoints`, {
@@ -123,10 +87,11 @@ await new Promise((resolve) => server.listen(mockPort, '0.0.0.0', resolve));
 let workspaceId = null;
 let projectId = null;
 let endpointId = null;
+let organizationId = null;
 
 try {
   await assertWebhookApiRoutesAvailable();
-  ({ workspaceId, projectId } = await seedWorkspaceProject());
+  ({ organizationId, workspaceId, projectId } = await seedWebhookWorkspaceProject());
   const target = `http://${webhookTargetHost}:${mockPort}${mockPath}`;
   const endpoint = await createEndpoint(workspaceId, target, 'run.finished', 'clear-secret-smoke');
   endpointId = endpoint?.item?.id;
@@ -135,17 +100,23 @@ try {
   await assertApiPatchContract(endpointId);
 
   const runId1 = crypto.randomUUID();
-  await postIngest('run.started', { runId: runId1, workspaceId, projectId, branch: 'main', commitSha: 'secret-on', ciProvider: 'local' });
-  await postIngest('run.finished', { runId: runId1, status: 'passed', totalSpecs: 1, totalTests: 1, passCount: 1, failCount: 0, flakyCount: 0 });
+  await postIngestEvent('run.started', { runId: runId1, workspaceId, projectId, branch: 'main', commitSha: 'secret-on', ciProvider: 'local' }, crypto.randomUUID());
+  await postIngestEvent('run.finished', { runId: runId1, status: 'passed', totalSpecs: 1, totalTests: 1, passCount: 1, failCount: 0, flakyCount: 0 }, crypto.randomUUID());
 
   const findRunRequest = (runId) => requests.find((r) => r?.body?.payload?.runId === runId && r?.body?.type === 'run.finished');
 
-  const deadline1 = Date.now() + waitTimeoutMs;
-  while (Date.now() < deadline1 && !findRunRequest(runId1)) {
-    await sleep(800);
+  const firstRequestPoll = await pollUntil({
+    label: 'webhook.clear-secret.first-delivery',
+    timeoutMs: waitTimeoutMs,
+    intervalMs: 800,
+    poll: async () => findRunRequest(runId1) || null,
+    isDone: Boolean,
+    mapState: (request) => request ? { n: request.n, signaturePresent: Boolean(request.headers['x-testharbor-signature']) } : null
+  });
+  const firstRequest = firstRequestPoll.value;
+  if (!firstRequest || firstRequestPoll.metrics.timedOut) {
+    throw new Error(`did not receive first run.finished webhook for runId=${runId1} in time; metrics=${JSON.stringify(firstRequestPoll.metrics)}`);
   }
-  const firstRequest = findRunRequest(runId1);
-  if (!firstRequest) throw new Error(`did not receive first run.finished webhook for runId=${runId1} in time`);
 
   const firstHasSignature = Boolean(firstRequest.headers['x-testharbor-signature']);
   if (!firstHasSignature) throw new Error('expected signature on first request before clearing secret');
@@ -153,15 +124,21 @@ try {
   await patchEndpoint(endpointId, { secret: null });
 
   const runId2 = crypto.randomUUID();
-  await postIngest('run.started', { runId: runId2, workspaceId, projectId, branch: 'main', commitSha: 'secret-off', ciProvider: 'local' });
-  await postIngest('run.finished', { runId: runId2, status: 'passed', totalSpecs: 1, totalTests: 1, passCount: 1, failCount: 0, flakyCount: 0 });
+  await postIngestEvent('run.started', { runId: runId2, workspaceId, projectId, branch: 'main', commitSha: 'secret-off', ciProvider: 'local' }, crypto.randomUUID());
+  await postIngestEvent('run.finished', { runId: runId2, status: 'passed', totalSpecs: 1, totalTests: 1, passCount: 1, failCount: 0, flakyCount: 0 }, crypto.randomUUID());
 
-  const deadline2 = Date.now() + waitTimeoutMs;
-  while (Date.now() < deadline2 && !findRunRequest(runId2)) {
-    await sleep(800);
+  const secondRequestPoll = await pollUntil({
+    label: 'webhook.clear-secret.second-delivery',
+    timeoutMs: waitTimeoutMs,
+    intervalMs: 800,
+    poll: async () => findRunRequest(runId2) || null,
+    isDone: Boolean,
+    mapState: (request) => request ? { n: request.n, signaturePresent: Boolean(request.headers['x-testharbor-signature']) } : null
+  });
+  const secondRequest = secondRequestPoll.value;
+  if (!secondRequest || secondRequestPoll.metrics.timedOut) {
+    throw new Error(`did not receive second run.finished webhook for runId=${runId2} in time; metrics=${JSON.stringify(secondRequestPoll.metrics)}`);
   }
-  const secondRequest = findRunRequest(runId2);
-  if (!secondRequest) throw new Error(`did not receive second run.finished webhook for runId=${runId2} in time`);
 
   const secondHasSignature = Boolean(secondRequest.headers['x-testharbor-signature']);
   if (secondHasSignature) throw new Error('expected no signature after clearing secret');
@@ -176,11 +153,16 @@ try {
       firstHasSignature,
       secondHasSignature,
       secretClearedBehaviorVerified: firstHasSignature && !secondHasSignature,
-      correlatedRunIds: { first: runId1, second: runId2 }
+      correlatedRunIds: { first: runId1, second: runId2 },
+      pollMetrics: {
+        firstDelivery: firstRequestPoll.metrics,
+        secondDelivery: secondRequestPoll.metrics
+      }
     }
   }, null, 2));
 } finally {
   await cleanupWebhookSmokeSeededData({
+    organizationId,
     workspaceId,
     projectId,
     endpointId,

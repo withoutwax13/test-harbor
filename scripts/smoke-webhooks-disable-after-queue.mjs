@@ -2,16 +2,19 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
+  artifactStamp,
   assertWebhookApiRoutesAvailable,
   cleanupWebhookSmokeSeededData,
   getWebhookSmokeCleanupSettings,
-  jsonFetch
+  jsonFetch,
+  pollUntil,
+  postIngestEvent,
+  seedWebhookWorkspaceProject,
+  sleep
 } from './webhook-smoke-helpers.mjs';
 
 const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
 const apiAuthToken = process.env.API_AUTH_TOKEN || '';
-const ingestAuthToken = process.env.INGEST_AUTH_TOKEN || '';
 
 const maxAttempts = Number(process.env.WEBHOOK_MAX_ATTEMPTS || 5);
 const workerBaseBackoffMs = Number(process.env.WEBHOOK_BASE_BACKOFF_MS || 2000);
@@ -48,14 +51,6 @@ const waitTimeoutMs = Number(process.env.WEBHOOK_WAIT_TIMEOUT_MS || defaultWaitT
 const artifactDir = process.env.WEBHOOK_ARTIFACT_DIR || '';
 const cleanupSettings = getWebhookSmokeCleanupSettings();
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function artifactStamp() {
-  return new Date().toISOString().replace(/[:.]/g, '-');
-}
-
 async function maybeWriteArtifact(payload) {
   if (!artifactDir) return null;
   const outDir = path.resolve(artifactDir);
@@ -63,53 +58,6 @@ async function maybeWriteArtifact(payload) {
   const file = path.join(outDir, `webhook-smoke-${artifactStamp()}-disable-after-queue.json`);
   await fs.writeFile(file, JSON.stringify(payload, null, 2));
   return file;
-}
-
-async function postIngest(type, payload, idempotencyKey = crypto.randomUUID()) {
-  return jsonFetch(
-    `${ingestBase}/v1/ingest/events`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ type, idempotencyKey, payload })
-    },
-    ingestAuthToken
-  );
-}
-
-async function seedWorkspaceProject() {
-  const ws = await jsonFetch(
-    `${apiBase}/v1/workspaces`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        organizationName: 'Webhook Org',
-        organizationSlug: `webhook-org-${Date.now()}`,
-        name: 'Webhook Workspace',
-        slug: `webhook-workspace-${Date.now()}`,
-        timezone: 'UTC',
-        retentionDays: 30
-      })
-    },
-    apiAuthToken
-  );
-
-  const project = await jsonFetch(
-    `${apiBase}/v1/projects`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        workspaceId: ws.item.id,
-        name: 'Webhook Project',
-        slug: `webhook-project-${Date.now()}`,
-        provider: 'github',
-        repoUrl: 'https://example.com/repo.git',
-        defaultBranch: 'main'
-      })
-    },
-    apiAuthToken
-  );
-
-  return { workspaceId: ws.item.id, projectId: project.item.id };
 }
 
 async function createEndpoint(workspaceId, targetUrl, type, secret) {
@@ -141,10 +89,11 @@ async function listDeliveries(workspaceId) {
 let workspaceId = null;
 let projectId = null;
 let endpointId = null;
+let organizationId = null;
 
 try {
   await assertWebhookApiRoutesAvailable();
-  ({ workspaceId, projectId } = await seedWorkspaceProject());
+  ({ organizationId, workspaceId, projectId } = await seedWebhookWorkspaceProject());
   if (!Number.isFinite(maxAttempts) || maxAttempts < 2) {
     throw new Error('WEBHOOK_MAX_ATTEMPTS must be >= 2 for disable-after-queue smoke');
   }
@@ -157,16 +106,16 @@ try {
   endpointId = endpoint?.item?.id || null;
 
   const runId = crypto.randomUUID();
-  await postIngest('run.started', {
+  await postIngestEvent('run.started', {
     runId,
     workspaceId,
     projectId,
     branch: 'main',
     commitSha: 'webhook-disable-after-queue',
     ciProvider: 'local'
-  });
+  }, crypto.randomUUID());
 
-  await postIngest('run.finished', {
+  await postIngestEvent('run.finished', {
     runId,
     status: 'passed',
     totalSpecs: 1,
@@ -174,41 +123,57 @@ try {
     passCount: 1,
     failCount: 0,
     flakyCount: 0
-  });
+  }, crypto.randomUUID());
 
-  let delivery = null;
-  const firstAttemptDeadline = Date.now() + waitTimeoutMs;
-  while (Date.now() < firstAttemptDeadline) {
-    const deliveries = await listDeliveries(workspaceId);
-    delivery = (deliveries.items || []).find((item) => item.event_type === 'run.finished') || null;
-    if (delivery && delivery.attempt_count >= 1 && delivery.status === 'retry_scheduled') {
-      break;
-    }
-    await sleep(200);
-  }
+  const firstAttemptPoll = await pollUntil({
+    label: 'webhook.disable-after-queue.first-retry',
+    timeoutMs: waitTimeoutMs,
+    intervalMs: 200,
+    poll: async () => {
+      const deliveries = await listDeliveries(workspaceId);
+      return (deliveries.items || []).find((item) => item.event_type === 'run.finished') || null;
+    },
+    isDone: (delivery) => Boolean(delivery && delivery.attempt_count >= 1 && delivery.status === 'retry_scheduled'),
+    mapState: (delivery) => delivery ? {
+      id: delivery.id,
+      status: delivery.status,
+      attempt_count: delivery.attempt_count,
+      last_error: delivery.last_error
+    } : null
+  });
+  const delivery = firstAttemptPoll.value;
 
   if (!delivery || delivery.status !== 'retry_scheduled') {
     throw new Error(
-      `expected first failed attempt before disabling endpoint; delivery=${JSON.stringify(delivery)}`
+      `expected first failed attempt before disabling endpoint; metrics=${JSON.stringify(firstAttemptPoll.metrics)}`
     );
   }
 
   await disableEndpoint(endpointId);
 
-  let final = null;
-  const terminalDeadline = Date.now() + waitTimeoutMs;
-  while (Date.now() < terminalDeadline) {
-    const deliveries = await listDeliveries(workspaceId);
-    const current = (deliveries.items || []).find((item) => item.id === delivery.id) || null;
-    if (current && current.status === 'dead') {
-      final = current;
-      break;
-    }
-    await sleep(250);
-  }
+  const terminalPoll = await pollUntil({
+    label: 'webhook.disable-after-queue.dead-terminal',
+    timeoutMs: waitTimeoutMs,
+    intervalMs: 250,
+    poll: async () => {
+      const deliveries = await listDeliveries(workspaceId);
+      return (deliveries.items || []).find((item) => item.id === delivery.id) || null;
+    },
+    isDone: (current) => current?.status === 'dead',
+    mapState: (current) => current ? {
+      id: current.id,
+      status: current.status,
+      attempt_count: current.attempt_count,
+      last_error: current.last_error,
+      response_status: current.response_status
+    } : null
+  });
+  const final = terminalPoll.value;
 
-  if (!final) {
-    throw new Error(`timeout waiting for disabled endpoint delivery to become dead; deliveryId=${delivery.id}`);
+  if (!final || terminalPoll.metrics.timedOut) {
+    throw new Error(
+      `timeout waiting for disabled endpoint delivery to become dead; metrics=${JSON.stringify(terminalPoll.metrics)}`
+    );
   }
 
   if (final.last_error !== 'endpoint_disabled') {
@@ -247,6 +212,10 @@ try {
     notificationEventId: final.notification_event_id,
     target,
     cleanupMode: cleanupSettings.seededDataMode,
+    pollMetrics: {
+      firstRetry: firstAttemptPoll.metrics,
+      terminal: terminalPoll.metrics
+    },
     finalDelivery: {
       status: final.status,
       attemptCount: final.attempt_count,
@@ -263,6 +232,7 @@ try {
   console.log(JSON.stringify(output, null, 2));
 } finally {
   await cleanupWebhookSmokeSeededData({
+    organizationId,
     workspaceId,
     projectId,
     endpointId,

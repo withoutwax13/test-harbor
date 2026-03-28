@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "[1/4] Starting local infra + services..."
-docker compose up -d postgres redis minio ingest api
+docker compose up -d postgres redis minio ingest api worker
 
 echo "[2/4] Applying migrations in container..."
 npm run db:migrate:container

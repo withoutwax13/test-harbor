@@ -3,16 +3,18 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
+  artifactStamp,
   assertWebhookApiRoutesAvailable,
   cleanupWebhookSmokeSeededData,
   getWebhookSmokeCleanupSettings,
-  jsonFetch
+  jsonFetch,
+  pollUntil,
+  postIngestEvent,
+  seedWebhookWorkspaceProject
 } from './webhook-smoke-helpers.mjs';
 
 const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
-const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
 const apiAuthToken = process.env.API_AUTH_TOKEN || '';
-const ingestAuthToken = process.env.INGEST_AUTH_TOKEN || '';
 
 const mockPort = Number(process.env.WEBHOOK_MOCK_PORT || 5099);
 const mockPath = process.env.WEBHOOK_MOCK_PATH || '/hook';
@@ -41,43 +43,6 @@ const waitTimeoutMs = Number(process.env.WEBHOOK_WAIT_TIMEOUT_MS || defaultWaitT
 const artifactDir = process.env.WEBHOOK_ARTIFACT_DIR || '';
 const cleanupSettings = getWebhookSmokeCleanupSettings();
 
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-
-async function postIngest(type, payload, idempotencyKey = crypto.randomUUID()) {
-  return jsonFetch(`${ingestBase}/v1/ingest/events`, {
-    method: 'POST',
-    body: JSON.stringify({ type, idempotencyKey, payload })
-  }, ingestAuthToken);
-}
-
-async function seedWorkspaceProject() {
-  const ws = await jsonFetch(`${apiBase}/v1/workspaces`, {
-    method: 'POST',
-    body: JSON.stringify({
-      organizationName: 'Webhook Org',
-      organizationSlug: `webhook-org-${Date.now()}`,
-      name: 'Webhook Workspace',
-      slug: `webhook-workspace-${Date.now()}`,
-      timezone: 'UTC',
-      retentionDays: 30
-    })
-  }, apiAuthToken);
-
-  const project = await jsonFetch(`${apiBase}/v1/projects`, {
-    method: 'POST',
-    body: JSON.stringify({
-      workspaceId: ws.item.id,
-      name: 'Webhook Project',
-      slug: `webhook-project-${Date.now()}`,
-      provider: 'github',
-      repoUrl: 'https://example.com/repo.git',
-      defaultBranch: 'main'
-    })
-  }, apiAuthToken);
-
-  return { workspaceId: ws.item.id, projectId: project.item.id };
-}
-
 async function createEndpoint(workspaceId, targetUrl, type, secret) {
   return jsonFetch(`${apiBase}/v1/webhook-endpoints`, {
     method: 'POST',
@@ -96,10 +61,6 @@ async function disableEndpoint(endpointId) {
   }, apiAuthToken);
 }
 
-
-function artifactStamp() {
-  return new Date().toISOString().replace(/[:.]/g, '-');
-}
 
 async function maybeWriteArtifact(payload) {
   if (!artifactDir) return null;
@@ -147,10 +108,11 @@ await new Promise((resolve) => server.listen(mockPort, '0.0.0.0', resolve));
 let workspaceId = null;
 let projectId = null;
 let endpointId = null;
+let organizationId = null;
 
 try {
   await assertWebhookApiRoutesAvailable();
-  ({ workspaceId, projectId } = await seedWorkspaceProject());
+  ({ organizationId, workspaceId, projectId } = await seedWebhookWorkspaceProject());
   if (!Number.isFinite(failCountBeforeSuccess) || failCountBeforeSuccess < 0) {
     throw new Error('WEBHOOK_MOCK_FAILS must be a non-negative number');
   }
@@ -174,16 +136,16 @@ try {
   endpointId = endpoint?.item?.id || null;
 
   const runId = crypto.randomUUID();
-  await postIngest('run.started', {
+  await postIngestEvent('run.started', {
     runId,
     workspaceId,
     projectId,
     branch: 'main',
     commitSha: 'webhook-smoke',
     ciProvider: 'local'
-  });
+  }, crypto.randomUUID());
 
-  await postIngest('run.finished', {
+  await postIngestEvent('run.finished', {
     runId,
     status: 'passed',
     totalSpecs: 1,
@@ -191,27 +153,36 @@ try {
     passCount: 1,
     failCount: 0,
     flakyCount: 0
+  }, crypto.randomUUID());
+
+  const terminalPoll = await pollUntil({
+    label: expectDead ? 'webhook.dead-terminal' : 'webhook.delivered-terminal',
+    timeoutMs: waitTimeoutMs,
+    intervalMs: 1200,
+    poll: async () => {
+      const deliveries = await listDeliveries(workspaceId);
+      const byRun = (deliveries.items || []).filter((d) => d.event_type === 'run.finished');
+      return byRun[0] || null;
+    },
+    isDone: (delivery) => delivery?.status === 'delivered' || delivery?.status === 'dead',
+    mapState: (delivery) => delivery ? {
+      status: delivery.status,
+      attempt_count: delivery.attempt_count,
+      max_attempts: delivery.max_attempts,
+      response_status: delivery.response_status,
+      last_error: delivery.last_error
+    } : null
   });
-
-  let final = null;
-  let lastObserved = null;
-  const deadline = Date.now() + waitTimeoutMs;
-  while (Date.now() < deadline) {
-    const deliveries = await listDeliveries(workspaceId);
-    const byRun = (deliveries.items || []).filter((d) => d.event_type === 'run.finished');
-    if (byRun.length) {
-      const top = byRun[0];
-      lastObserved = { status: top.status, attempt_count: top.attempt_count, max_attempts: top.max_attempts, response_status: top.response_status, last_error: top.last_error };
-      if (top.status === 'delivered' || top.status === 'dead') {
-        final = top;
-        break;
-      }
-    }
-    await sleep(1200);
-  }
-
+  const final = terminalPoll.value;
   if (!final) {
-    throw new Error(`timeout waiting for webhook delivery terminal state (delivered/dead) within ${waitTimeoutMs}ms; lastObserved=${JSON.stringify(lastObserved)} mockReceived=${received}`);
+    throw new Error(
+      `timeout waiting for webhook delivery terminal state within ${waitTimeoutMs}ms; metrics=${JSON.stringify(terminalPoll.metrics)} mockReceived=${received}`
+    );
+  }
+  if (terminalPoll.metrics.timedOut) {
+    throw new Error(
+      `timeout waiting for webhook delivery terminal state within ${waitTimeoutMs}ms; metrics=${JSON.stringify(terminalPoll.metrics)} mockReceived=${received}`
+    );
   }
 
   if (expectDead) {
@@ -247,6 +218,7 @@ try {
     deliveryMaxAttempts: final.max_attempts,
     expectDead,
     waitTimeoutMs,
+    pollMetrics: terminalPoll.metrics,
     signatureSeen,
     mockReceived: received,
     cleanupMode: cleanupSettings.seededDataMode,
@@ -269,6 +241,7 @@ try {
   console.log(JSON.stringify(output, null, 2));
 } finally {
   await cleanupWebhookSmokeSeededData({
+    organizationId,
     workspaceId,
     projectId,
     endpointId,
