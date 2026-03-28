@@ -408,6 +408,9 @@ app.get('/v1/runs/:id', async (request, reply) => {
 });
 
 app.delete('/v1/organizations/:id/smoke-cleanup', async (request, reply) => {
+  if (!API_AUTH_TOKEN) {
+    return reply.code(403).send({ error: 'smoke_org_cleanup_requires_api_token' });
+  }
   if (process.env.ALLOW_SMOKE_ORG_CLEANUP !== '1') {
     return reply.code(403).send({ error: 'smoke_org_cleanup_disabled' });
   }

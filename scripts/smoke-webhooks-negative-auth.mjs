@@ -29,6 +29,23 @@ async function maybeWriteArtifact(payload) {
   return file;
 }
 
+async function checkGoodAuth({ name, url, method = 'GET', body, tokenType }) {
+  const goodToken = tokenType === 'api' ? expectedApiToken : expectedIngestToken;
+  const init = {
+    method,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) })
+  };
+  const good = await fetchJsonWithStatus(url, init, goodToken);
+  if (good.status === 401) {
+    throw new Error(`${name} expected authenticated token to be accepted, got ${good.status}`);
+  }
+  return {
+    name,
+    tokenType,
+    goodStatus: good.status
+  };
+}
+
 async function checkCase({ name, url, method = 'GET', body, tokenType, missingExpected = 401, invalidExpected = 401 }) {
   const goodToken = tokenType === 'api' ? expectedApiToken : expectedIngestToken;
   const invalidToken = `${goodToken}${badSuffix}`;
@@ -59,6 +76,11 @@ const dummyWorkspaceId = '00000000-0000-0000-0000-000000000000';
 const dummyEndpointId = '00000000-0000-0000-0000-000000000001';
 const results = [];
 
+results.push(await checkGoodAuth({
+  name: 'api.listWebhookEndpoints',
+  url: `${apiBase}/v1/webhook-endpoints?workspaceId=${dummyWorkspaceId}`,
+  tokenType: 'api'
+}));
 results.push(await checkCase({
   name: 'api.listWebhookEndpoints',
   url: `${apiBase}/v1/webhook-endpoints?workspaceId=${dummyWorkspaceId}`,
@@ -94,6 +116,44 @@ results.push(await checkCase({
   url: `${apiBase}/v1/webhook-deliveries?workspaceId=${dummyWorkspaceId}`,
   tokenType: 'api'
 }));
+results.push(await checkGoodAuth({
+  name: 'api.createWebhookEndpoint',
+  url: `${apiBase}/v1/webhook-endpoints`,
+  method: 'POST',
+  body: {
+    workspaceId: dummyWorkspaceId,
+    type: 'run.finished',
+    targetUrl: 'http://127.0.0.1:9/hook',
+    enabled: true
+  },
+  tokenType: 'api'
+}));
+
+results.push(await checkCase({
+  name: 'api.createWebhookEndpoint',
+  url: `${apiBase}/v1/webhook-endpoints`,
+  method: 'POST',
+  body: {
+    workspaceId: dummyWorkspaceId,
+    type: 'run.finished',
+    targetUrl: 'http://127.0.0.1:9/hook',
+    enabled: true
+  },
+  tokenType: 'api'
+}));
+
+results.push(await checkGoodAuth({
+  name: 'ingest.postEvent',
+  url: `${ingestBase}/v1/ingest/events`,
+  method: 'POST',
+  body: {
+    type: 'run.finished',
+    idempotencyKey: crypto.randomUUID(),
+    payload: { runId: crypto.randomUUID(), status: 'passed' }
+  },
+  tokenType: 'ingest'
+}));
+
 results.push(await checkCase({
   name: 'ingest.postEvent',
   url: `${ingestBase}/v1/ingest/events`,
