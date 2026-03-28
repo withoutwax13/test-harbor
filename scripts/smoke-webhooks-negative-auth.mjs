@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   artifactStamp,
+  assertWebhookApiRoutesAvailable,
   fetchJsonWithStatus
 } from './webhook-smoke-helpers.mjs';
 
@@ -16,6 +17,8 @@ const badSuffix = `-invalid-${Date.now()}`;
 if (!expectedApiToken || !expectedIngestToken) {
   throw new Error('API_AUTH_TOKEN and INGEST_AUTH_TOKEN are required for smoke:webhooks:auth:negative');
 }
+
+await assertWebhookApiRoutesAvailable();
 
 async function maybeWriteArtifact(payload) {
   if (!artifactDir) return null;
