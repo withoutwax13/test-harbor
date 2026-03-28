@@ -320,7 +320,7 @@ async function fetchRunSummary(runId) {
             count(*) filter (where tr.status = 'passed')::int as passed,
             count(*) filter (where tr.status = 'failed')::int as failed,
             count(*) filter (where tr.status = 'flaky')::int as flaky,
-            coalesce(sum(duration_ms), 0)::int as total_test_duration_ms
+            coalesce(sum(tr.duration_ms), 0)::int as total_test_duration_ms
      from test_results tr
      join spec_runs sr on sr.id = tr.spec_run_id
      where sr.run_id = $1`,
