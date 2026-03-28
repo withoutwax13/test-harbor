@@ -109,7 +109,7 @@ const createGood = await checkGoodAuth({
   tokenType: 'api'
 });
 results.push(createGood);
-const createdEndpointId = createGood.body?.id || dummyEndpointId;
+const createdEndpointId = createGood.body?.id || createGood.body?.item?.id || dummyEndpointId;
 results.push(await checkCase({
   name: 'api.createWebhookEndpoint',
   url: `${apiBase}/v1/webhook-endpoints`,
