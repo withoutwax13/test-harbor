@@ -86,16 +86,33 @@ results.push(await checkCase({
   url: `${apiBase}/v1/webhook-endpoints?workspaceId=${dummyWorkspaceId}`,
   tokenType: 'api'
 }));
+
+const createPayload = {
+  workspaceId: dummyWorkspaceId,
+  type: 'run.finished',
+  targetUrl: 'http://127.0.0.1:9/hook',
+  enabled: true
+};
+results.push(await checkGoodAuth({
+  name: 'api.createWebhookEndpoint',
+  url: `${apiBase}/v1/webhook-endpoints`,
+  method: 'POST',
+  body: createPayload,
+  tokenType: 'api'
+}));
 results.push(await checkCase({
   name: 'api.createWebhookEndpoint',
   url: `${apiBase}/v1/webhook-endpoints`,
   method: 'POST',
-  body: {
-    workspaceId: dummyWorkspaceId,
-    type: 'run.finished',
-    targetUrl: 'http://127.0.0.1:9/hook',
-    enabled: true
-  },
+  body: createPayload,
+  tokenType: 'api'
+}));
+
+results.push(await checkGoodAuth({
+  name: 'api.patchWebhookEndpoint',
+  url: `${apiBase}/v1/webhook-endpoints/${dummyEndpointId}`,
+  method: 'PATCH',
+  body: { enabled: false },
   tokenType: 'api'
 }));
 results.push(await checkCase({
@@ -105,10 +122,23 @@ results.push(await checkCase({
   body: { enabled: false },
   tokenType: 'api'
 }));
+
+results.push(await checkGoodAuth({
+  name: 'api.deleteWebhookEndpoint',
+  url: `${apiBase}/v1/webhook-endpoints/${dummyEndpointId}`,
+  method: 'DELETE',
+  tokenType: 'api'
+}));
 results.push(await checkCase({
   name: 'api.deleteWebhookEndpoint',
   url: `${apiBase}/v1/webhook-endpoints/${dummyEndpointId}`,
   method: 'DELETE',
+  tokenType: 'api'
+}));
+
+results.push(await checkGoodAuth({
+  name: 'api.listWebhookDeliveries',
+  url: `${apiBase}/v1/webhook-deliveries?workspaceId=${dummyWorkspaceId}`,
   tokenType: 'api'
 }));
 results.push(await checkCase({
@@ -116,43 +146,30 @@ results.push(await checkCase({
   url: `${apiBase}/v1/webhook-deliveries?workspaceId=${dummyWorkspaceId}`,
   tokenType: 'api'
 }));
-results.push(await checkGoodAuth({
-  name: 'api.createWebhookEndpoint',
-  url: `${apiBase}/v1/webhook-endpoints`,
-  method: 'POST',
-  body: {
-    workspaceId: dummyWorkspaceId,
-    type: 'run.finished',
-    targetUrl: 'http://127.0.0.1:9/hook',
-    enabled: true
-  },
-  tokenType: 'api'
-}));
 
-
+const ingestPayload = {
+  type: 'run.finished',
+  idempotencyKey: crypto.randomUUID(),
+  payload: { runId: crypto.randomUUID(), status: 'passed' }
+};
 results.push(await checkGoodAuth({
   name: 'ingest.postEvent',
   url: `${ingestBase}/v1/ingest/events`,
   method: 'POST',
-  body: {
-    type: 'run.finished',
-    idempotencyKey: crypto.randomUUID(),
-    payload: { runId: crypto.randomUUID(), status: 'passed' }
-  },
+  body: ingestPayload,
   tokenType: 'ingest'
 }));
-
 results.push(await checkCase({
   name: 'ingest.postEvent',
   url: `${ingestBase}/v1/ingest/events`,
   method: 'POST',
   body: {
-    type: 'run.finished',
-    idempotencyKey: crypto.randomUUID(),
-    payload: { runId: crypto.randomUUID(), status: 'passed' }
+    ...ingestPayload,
+    idempotencyKey: crypto.randomUUID()
   },
   tokenType: 'ingest'
 }));
+
 
 const output = {
   ok: true,

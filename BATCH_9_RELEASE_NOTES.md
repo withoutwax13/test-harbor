@@ -25,7 +25,6 @@ node --check scripts/smoke-webhooks.mjs
 node --check scripts/smoke-webhooks-negative-auth.mjs
 node --check scripts/smoke-webhooks-disable-after-queue.mjs
 node --check scripts/smoke-webhooks-clear-secret.mjs
-node --check scripts/smoke-webhooks-negative-auth.mjs
 ```
 
 ## Evidence Artifacts
