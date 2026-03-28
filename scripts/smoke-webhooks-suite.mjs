@@ -39,12 +39,14 @@ await fs.mkdir(outDir, { recursive: true });
 const delivered = await runNode('scripts/smoke-webhooks.mjs');
 const dead = await runNode('scripts/smoke-webhooks-dead.mjs');
 const clearSecret = includeClearSecret ? await runNode('scripts/smoke-webhooks-clear-secret.mjs') : null;
+const disableAfterQueue = await runNode('scripts/smoke-webhooks-disable-after-queue.mjs');
 
 const combined = {
   ok: true,
   generatedAt: new Date().toISOString(),
   delivered,
   dead,
+  disableAfterQueue,
   ...(includeClearSecret ? { clearSecret } : {})
 };
 const suitePath = path.join(outDir, `webhook-smoke-suite-${stamp}.json`);

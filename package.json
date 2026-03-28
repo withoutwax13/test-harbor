@@ -23,6 +23,7 @@
     "smoke:webhooks:auth": "node scripts/smoke-webhooks-auth.mjs",
     "smoke:webhooks:dead:auth": "node scripts/smoke-webhooks-dead-auth.mjs",
     "smoke:webhooks:suite": "node scripts/smoke-webhooks-suite.mjs",
-    "smoke:webhooks:clear-secret": "node scripts/smoke-webhooks-clear-secret.mjs"
+    "smoke:webhooks:clear-secret": "node scripts/smoke-webhooks-clear-secret.mjs",
+    "smoke:webhooks:disable-after-queue": "node scripts/smoke-webhooks-disable-after-queue.mjs"
   }
 }

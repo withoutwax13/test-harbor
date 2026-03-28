@@ -88,6 +88,25 @@ async function markDeliveryRetry(id, errText, responseStatus, responseBody) {
   );
 }
 
+async function markDeliveryTerminal(id, status, errText, responseStatus = null, responseBody = null) {
+  await query(
+    `update webhook_deliveries
+     set status = $2,
+         last_error = $3,
+         response_status = $4,
+         response_body = $5,
+         updated_at = now()
+     where id = $1`,
+    [
+      id,
+      status,
+      errText.slice(0, 2000),
+      responseStatus ?? null,
+      responseBody?.slice(0, 4000) ?? null
+    ]
+  );
+}
+
 async function syncNotificationStatus(notificationEventId) {
   const { rows } = await query(
     `select
@@ -114,8 +133,19 @@ async function syncNotificationStatus(notificationEventId) {
 }
 
 async function deliverOne(delivery) {
-  const endpointSecretRow = await query('select secret from webhook_endpoints where id = $1', [delivery.webhook_endpoint_id]);
-  const secret = endpointSecretRow.rows[0]?.secret || '';
+  const endpointRow = await query(
+    'select secret, enabled from webhook_endpoints where id = $1',
+    [delivery.webhook_endpoint_id]
+  );
+  const endpoint = endpointRow.rows[0];
+
+  if (!endpoint?.enabled) {
+    await markDeliveryTerminal(delivery.id, 'dead', 'endpoint_disabled');
+    await syncNotificationStatus(delivery.notification_event_id);
+    return;
+  }
+
+  const secret = endpoint.secret || '';
 
   const bodyJson = JSON.stringify(delivery.payload);
   const ts = Math.floor(Date.now() / 1000).toString();
