@@ -11,6 +11,7 @@ const mockPath = process.env.WEBHOOK_MOCK_PATH || '/hook';
 const failCountBeforeSuccess = Number(process.env.WEBHOOK_MOCK_FAILS || 2);
 const maxAttempts = Number(process.env.WEBHOOK_MAX_ATTEMPTS || 5);
 const webhookTargetHost = process.env.WEBHOOK_TARGET_HOST || 'host.docker.internal';
+const expectDead = process.env.WEBHOOK_EXPECT_DEAD === '1';
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -143,8 +144,14 @@ try {
   if (!Number.isFinite(failCountBeforeSuccess) || failCountBeforeSuccess < 0) {
     throw new Error('WEBHOOK_MOCK_FAILS must be a non-negative number');
   }
-  if (failCountBeforeSuccess >= maxAttempts) {
-    throw new Error(`WEBHOOK_MOCK_FAILS (${failCountBeforeSuccess}) must be less than WEBHOOK_MAX_ATTEMPTS (${maxAttempts})`);
+  if (!Number.isFinite(maxAttempts) || maxAttempts < 1) {
+    throw new Error('WEBHOOK_MAX_ATTEMPTS must be a positive number');
+  }
+  if (!expectDead && failCountBeforeSuccess >= maxAttempts) {
+    throw new Error(`WEBHOOK_MOCK_FAILS (${failCountBeforeSuccess}) must be less than WEBHOOK_MAX_ATTEMPTS (${maxAttempts}) for delivered-path smoke`);
+  }
+  if (expectDead && failCountBeforeSuccess < maxAttempts) {
+    throw new Error(`WEBHOOK_EXPECT_DEAD=1 requires WEBHOOK_MOCK_FAILS (${failCountBeforeSuccess}) >= WEBHOOK_MAX_ATTEMPTS (${maxAttempts})`);
   }
 
   const target = `http://${webhookTargetHost}:${mockPort}${mockPath}`;
@@ -191,11 +198,21 @@ try {
     throw new Error('timeout waiting for webhook delivery terminal state (delivered/dead)');
   }
 
-  if (final.status !== 'delivered') {
-    throw new Error(`expected delivered, got ${final.status} attempts=${final.attempt_count}`);
-  }
-  if ((final.attempt_count || 0) < failCountBeforeSuccess + 1) {
-    throw new Error(`expected at least ${failCountBeforeSuccess + 1} attempts, got ${final.attempt_count}`);
+  if (expectDead) {
+    if (final.status !== 'dead') {
+      throw new Error(`expected dead, got ${final.status} attempts=${final.attempt_count}`);
+    }
+    const deliveryMaxAttempts = Number(final.max_attempts || maxAttempts);
+    if ((final.attempt_count || 0) !== deliveryMaxAttempts) {
+      throw new Error(`expected dead-letter attempts=${deliveryMaxAttempts}, got ${final.attempt_count}`);
+    }
+  } else {
+    if (final.status !== 'delivered') {
+      throw new Error(`expected delivered, got ${final.status} attempts=${final.attempt_count}`);
+    }
+    if ((final.attempt_count || 0) < failCountBeforeSuccess + 1) {
+      throw new Error(`expected at least ${failCountBeforeSuccess + 1} attempts, got ${final.attempt_count}`);
+    }
   }
 
   const signatureSeen = requests.some((r) => Boolean(r.headers['x-testharbor-signature']));
@@ -210,7 +227,9 @@ try {
     runId,
     target,
     webhookTargetHost,
-    maxAttempts,
+    maxAttemptsConfigured: maxAttempts,
+    deliveryMaxAttempts: final.max_attempts,
+    expectDead,
     signatureSeen,
     mockReceived: received,
     finalDelivery: {
@@ -220,6 +239,7 @@ try {
       responseStatus: final.response_status,
       lastError: final.last_error
     },
+    auth: { apiAuthTokenConfigured: Boolean(apiAuthToken), ingestAuthTokenConfigured: Boolean(ingestAuthToken) },
     requestSamples: requests.slice(0, 3).map((r) => ({
       n: r.n,
       event: r.headers['x-testharbor-event'],

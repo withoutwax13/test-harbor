@@ -18,6 +18,7 @@
     "smoke:all": "node scripts/smoke-all.mjs",
     "test:ingest:contract": "node scripts/test-ingest-contract.mjs",
     "smoke:bootstrap": "bash scripts/smoke-all.sh",
-    "smoke:webhooks": "node scripts/smoke-webhooks.mjs"
+    "smoke:webhooks": "node scripts/smoke-webhooks.mjs",
+    "smoke:webhooks:dead": "node scripts/smoke-webhooks-dead.mjs"
   }
 }
