@@ -1,6 +1,7 @@
 # Local Dev Quickstart (Windows-safe defaults)
 
 ## Ports used
+- Web: `3000`
 - API: `4000`
 - Ingest: `4010`
 - Postgres: `5433 -> 5432` (container)
@@ -14,7 +15,7 @@
 ```
 
 This runs:
-1. `docker compose up -d postgres redis minio ingest api worker`
+1. `docker compose up -d postgres redis minio ingest api worker web`
 2. `npm run db:migrate:container`
 3. `npm run seed:local`
 4. `npm run smoke:all`
@@ -22,7 +23,7 @@ This runs:
 ## Manual fallback
 
 ```bash
-docker compose up -d postgres redis minio ingest api worker
+docker compose up -d postgres redis minio ingest api worker web
 npm run db:migrate:container
 npm run seed:local
 npm run smoke:all
@@ -33,6 +34,22 @@ npm run smoke:all
 - **Port conflicts** on 5432/6379: keep the compose remaps (5433/6380).
 - **`psql: command not found`**: use `npm run db:migrate:container` (no host psql needed).
 - **API unreachable**: `docker compose up -d api && docker compose logs --tail=120 api`.
+
+## Browser flow
+
+1. Open `http://localhost:3000/login`.
+2. Sign in with a local name and email.
+3. Use `/app/onboarding` to create or select a workspace and project.
+4. Copy the connect snippet into a shell or CI job.
+5. Use `/app/connect` to inspect API, ingest, and worker health, then queue a test event.
+6. Use `/app/runs` and `/app/runs/:id` for browser triage.
+7. Use `/app/admin` for webhook endpoint and delivery basics.
+
+Browser smoke:
+
+```bash
+npm run smoke:web-shell
+```
 
 ## Auth (optional)
 Set these in `.env` to enforce bearer auth:
