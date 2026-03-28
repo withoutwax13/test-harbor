@@ -12,6 +12,24 @@ const failCountBeforeSuccess = Number(process.env.WEBHOOK_MOCK_FAILS || 2);
 const maxAttempts = Number(process.env.WEBHOOK_MAX_ATTEMPTS || 5);
 const webhookTargetHost = process.env.WEBHOOK_TARGET_HOST || 'host.docker.internal';
 const expectDead = process.env.WEBHOOK_EXPECT_DEAD === '1';
+const workerBaseBackoffMs = Number(process.env.WEBHOOK_BASE_BACKOFF_MS || 2000);
+const workerPollMs = Number(process.env.WEBHOOK_WORKER_POLL_MS || 1500);
+const workerRequestTimeoutMs = Number(process.env.WEBHOOK_TIMEOUT_MS || 6000);
+
+function defaultWaitTimeoutMs() {
+  if (!expectDead) return 35000;
+  // Mirror worker retry cadence: retryDelayMs(attempt)=BASE_BACKOFF_MS*2^attempt
+  // with attempt_count incremented before each attempt and dead when attempt_count >= max_attempts.
+  const retries = Math.max(0, maxAttempts - 1);
+  const backoffBudget = Array.from({ length: retries }, (_, i) => workerBaseBackoffMs * (2 ** (i + 1)))
+    .reduce((a, b) => a + b, 0);
+  const attemptBudget = maxAttempts * workerRequestTimeoutMs;
+  const pollBudget = (retries + 2) * workerPollMs;
+  const jitterBudget = 15000;
+  return Math.max(90000, backoffBudget + attemptBudget + pollBudget + jitterBudget);
+}
+
+const waitTimeoutMs = Number(process.env.WEBHOOK_WAIT_TIMEOUT_MS || defaultWaitTimeoutMs());
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -147,6 +165,9 @@ try {
   if (!Number.isFinite(maxAttempts) || maxAttempts < 1) {
     throw new Error('WEBHOOK_MAX_ATTEMPTS must be a positive number');
   }
+  if (!Number.isFinite(waitTimeoutMs) || waitTimeoutMs < 1000) {
+    throw new Error('WEBHOOK_WAIT_TIMEOUT_MS must be >= 1000 when provided');
+  }
   if (!expectDead && failCountBeforeSuccess >= maxAttempts) {
     throw new Error(`WEBHOOK_MOCK_FAILS (${failCountBeforeSuccess}) must be less than WEBHOOK_MAX_ATTEMPTS (${maxAttempts}) for delivered-path smoke`);
   }
@@ -180,12 +201,14 @@ try {
   });
 
   let final = null;
-  const deadline = Date.now() + 35000;
+  let lastObserved = null;
+  const deadline = Date.now() + waitTimeoutMs;
   while (Date.now() < deadline) {
     const deliveries = await listDeliveries(workspaceId);
     const byRun = (deliveries.items || []).filter((d) => d.event_type === 'run.finished');
     if (byRun.length) {
       const top = byRun[0];
+      lastObserved = { status: top.status, attempt_count: top.attempt_count, max_attempts: top.max_attempts, response_status: top.response_status, last_error: top.last_error };
       if (top.status === 'delivered' || top.status === 'dead') {
         final = top;
         break;
@@ -195,7 +218,7 @@ try {
   }
 
   if (!final) {
-    throw new Error('timeout waiting for webhook delivery terminal state (delivered/dead)');
+    throw new Error(`timeout waiting for webhook delivery terminal state (delivered/dead) within ${waitTimeoutMs}ms; lastObserved=${JSON.stringify(lastObserved)} mockReceived=${received}`);
   }
 
   if (expectDead) {
@@ -230,6 +253,7 @@ try {
     maxAttemptsConfigured: maxAttempts,
     deliveryMaxAttempts: final.max_attempts,
     expectDead,
+    waitTimeoutMs,
     signatureSeen,
     mockReceived: received,
     finalDelivery: {
