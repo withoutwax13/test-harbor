@@ -30,6 +30,9 @@
     "smoke:auth-explorer": "node scripts/smoke-auth-explorer.mjs",
     "smoke:notifications-retention": "node scripts/smoke-notifications-retention.mjs",
     "smoke:auth:explorer": "node scripts/smoke-auth-explorer.mjs",
-    "smoke:notifications:retention": "node scripts/smoke-notifications-retention.mjs"
+    "smoke:notifications:retention": "node scripts/smoke-notifications-retention.mjs",
+    "verify:batch19-26:static": "node scripts/verify-batch19-26.mjs static",
+    "verify:batch19-26:onboarding": "node scripts/verify-batch19-26.mjs onboarding",
+    "verify:batch19-26:cypress": "node scripts/verify-batch19-26.mjs cypress"
   }
 }
