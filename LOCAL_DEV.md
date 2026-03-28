@@ -45,48 +45,61 @@ When set, all `/v1/*` routes require `Authorization: Bearer <token>`.
 - Full local bootstrap: `npm run smoke:bootstrap`
 
 
-## Webhook smoke evidence (Batch6B/6C)
+## Webhook smoke closure
 
-Validated runtime paths:
-- `npm run smoke:webhooks` → delivered path with retries + signature header
-- `npm run smoke:webhooks:dead` → dead-letter path at max attempts
+Validated lanes:
+- `npm run smoke:webhooks` -> delivered path with retries plus signature header
+- `npm run smoke:webhooks:dead` -> dead-letter path at max attempts
+- `npm run smoke:webhooks:suite` -> delivered + dead + disable-after-queue + clear-secret, with combined JSON artifact
+- `npm run smoke:webhooks:auth` -> auth-enabled delivered path
+- `npm run smoke:webhooks:dead:auth` -> auth-enabled dead-letter path
 
-Useful commands:
-- `npm run smoke:webhooks:suite` (runs delivered + dead + clear-secret checks and writes combined JSON artifact)
-- `npm run smoke:webhooks:auth` (requires `API_AUTH_TOKEN` + `INGEST_AUTH_TOKEN`)
-- `npm run smoke:webhooks:dead:auth` (requires `API_AUTH_TOKEN` + `INGEST_AUTH_TOKEN`)
+Runtime guardrails:
+- The delivered/dead/disable-after-queue webhook smokes probe `GET /v1/webhook-endpoints` first and fail fast on `404` with a stale-runtime rebuild hint.
+- `smoke:webhooks:clear-secret` also preflights `PATCH /v1/webhook-endpoints/:id` and expects `400` for `{}` before verifying `secret: null` behavior.
 
 Artifact persistence:
-- Set `WEBHOOK_ARTIFACT_DIR` (default for suite: `artifacts/webhooks`)
-- Harness now writes per-run artifact when `WEBHOOK_ARTIFACT_DIR` is set
+- Set `WEBHOOK_ARTIFACT_DIR` to retain per-run JSON artifacts.
+- Suite default artifact directory: `artifacts/webhooks`
+- Skip the clear-secret leg if needed: `WEBHOOK_INCLUDE_CLEAR_SECRET=0 npm run smoke:webhooks:suite`
 
-Teardown hygiene:
-- Harness disables the created webhook endpoint on exit (`WEBHOOK_DISABLE_ENDPOINT_ON_EXIT=0` to opt out).
+Teardown and data hygiene:
+- Default-safe mode is `WEBHOOK_SEEDED_DATA_MODE=keep`. The harness disables the created endpoint on exit, but leaves the seeded workspace/project rows intact for inspection.
+- Opt into full teardown with `WEBHOOK_SEEDED_DATA_MODE=teardown`. In that mode the harness deletes the seeded webhook endpoint, project, and workspace tree on exit.
+- `WEBHOOK_DISABLE_ENDPOINT_ON_EXIT=0` still opts out of the endpoint-disable fallback when you need to inspect the live endpoint row after a run.
 
-## Batch 6 wrap-up status (2026-03-28)
+Green closure evidence snippet:
 
-Batch 6 webhook reliability validation is complete.
+```bash
+$ WEBHOOK_ARTIFACT_DIR=artifacts/webhooks WEBHOOK_SEEDED_DATA_MODE=teardown npm run smoke:webhooks:suite
+$ npm run smoke:webhooks:auth
+$ npm run smoke:webhooks:dead:auth
+```
 
-Verified green lanes:
-- `npm run smoke:webhooks` (delivered path with retries)
-- `npm run smoke:webhooks:dead` (dead-letter path at max attempts)
-- `npm run smoke:webhooks:auth` (auth-enabled delivered path)
-- `npm run smoke:webhooks:dead:auth` (auth-enabled dead-letter path)
+```json
+{
+  "ok": true,
+  "artifactPath": "artifacts/webhooks/webhook-smoke-suite-2026-03-28T12-00-00-000Z.json",
+  "includeClearSecret": true
+}
+{
+  "ok": true,
+  "cleanupMode": "teardown",
+  "finalDelivery": { "status": "delivered" }
+}
+{
+  "ok": true,
+  "cleanupMode": "teardown",
+  "finalDelivery": { "status": "dead" }
+}
+```
 
-Evidence:
-- Combined suite artifact generated via `npm run smoke:webhooks:suite`
-- Example artifact path: `artifacts/webhooks/webhook-smoke-suite-*.json`
+Troubleshooting matrix:
 
-Decision:
-- Batch 6 (B/6C scope) is closed for runtime verification.
-- Proceed to Batch 7 planning/implementation.
-
-## Batch 7 kickoff checks
-
-Webhook endpoint patch semantics hardening:
-- `npm run smoke:webhooks:clear-secret`
-  - verifies signature exists before `PATCH secret:null`
-  - verifies signature is absent after secret is cleared
-
-
-- To skip clear-secret in suite: `WEBHOOK_INCLUDE_CLEAR_SECRET=0 npm run smoke:webhooks:suite`
+| Symptom | Likely cause | Action |
+| --- | --- | --- |
+| `Webhook API route missing ... (404)` | Stale `api` container/image or wrong `API_BASE_URL` target | `docker compose build --no-cache api ingest worker && docker compose up -d postgres redis api ingest worker` |
+| `webhook PATCH contract preflight expected 400 ...` | API runtime does not include the latest webhook patch validation | Rebuild `api`, `ingest`, and `worker`, then rerun `npm run smoke:webhooks:clear-secret` or the suite |
+| `401 unauthorized` in auth lanes | Missing or mismatched `API_AUTH_TOKEN` / `INGEST_AUTH_TOKEN` | Export matching bearer tokens for API and ingest before running auth smokes |
+| `timeout waiting for webhook delivery terminal state` | Worker not running, stale runtime, or retry window too short | Check `docker compose logs --tail=200 api ingest worker`; increase `WEBHOOK_WAIT_TIMEOUT_MS` only after confirming current images |
+| Seeded webhook smoke rows remain after run | Running default-safe mode | Use `WEBHOOK_SEEDED_DATA_MODE=teardown` when you want the seeded workspace/project tree removed automatically |

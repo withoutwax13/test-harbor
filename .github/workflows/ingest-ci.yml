@@ -14,6 +14,8 @@ jobs:
       INGEST_AUTH_TOKEN: ci-ingest-token
       API_BASE_URL: http://localhost:4000
       INGEST_BASE_URL: http://localhost:4010
+      WEBHOOK_ARTIFACT_DIR: artifacts/webhooks
+      WEBHOOK_SEEDED_DATA_MODE: teardown
 
     steps:
       - name: Checkout
@@ -42,6 +44,15 @@ jobs:
 
       - name: End-to-end smoke
         run: npm run smoke:all
+
+      - name: Webhook smoke suite
+        run: npm run smoke:webhooks:suite
+
+      - name: Webhook smoke auth
+        run: npm run smoke:webhooks:auth
+
+      - name: Webhook dead-letter auth
+        run: npm run smoke:webhooks:dead:auth
 
       - name: Print compose logs on failure
         if: failure()
