@@ -14,6 +14,32 @@ const webhookTargetHost = process.env.WEBHOOK_TARGET_HOST || 'host.docker.intern
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+
+async function assertWebhookApiRoutesAvailable() {
+  const probeUrl = `${apiBase}/v1/webhook-endpoints?workspaceId=route-probe`;
+  const res = await fetch(probeUrl, {
+    method: 'GET',
+    headers: {
+      ...(apiAuthToken ? { authorization: `Bearer ${apiAuthToken}` } : {})
+    }
+  });
+
+  if (res.status === 404) {
+    throw new Error(
+      [
+        `Webhook API route missing at ${probeUrl} (404).`,
+        'This usually means api container is stale or wrong target is bound to API_BASE_URL.',
+        'Run: docker compose build --no-cache api ingest worker && docker compose up -d postgres redis api ingest worker'
+      ].join(' ')
+    );
+  }
+
+  if (res.status >= 500) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Webhook API route probe failed ${res.status}: ${body}`);
+  }
+}
+
 async function jsonFetch(url, init = {}, authToken = '') {
   const res = await fetch(url, {
     ...init,
@@ -111,6 +137,7 @@ const server = http.createServer(async (req, res) => {
 await new Promise((resolve) => server.listen(mockPort, '0.0.0.0', resolve));
 
 try {
+  await assertWebhookApiRoutesAvailable();
   const { workspaceId, projectId } = await seedWorkspaceProject();
   if (!Number.isFinite(failCountBeforeSuccess) || failCountBeforeSuccess < 0) {
     throw new Error('WEBHOOK_MOCK_FAILS must be a non-negative number');
