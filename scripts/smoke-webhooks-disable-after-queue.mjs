@@ -7,8 +7,38 @@ const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
 const apiAuthToken = process.env.API_AUTH_TOKEN || '';
 const ingestAuthToken = process.env.INGEST_AUTH_TOKEN || '';
 
+const maxAttempts = Number(process.env.WEBHOOK_MAX_ATTEMPTS || 5);
+const workerBaseBackoffMs = Number(process.env.WEBHOOK_BASE_BACKOFF_MS || 2000);
 const workerPollMs = Number(process.env.WEBHOOK_WORKER_POLL_MS || 1500);
-const waitTimeoutMs = Number(process.env.WEBHOOK_WAIT_TIMEOUT_MS || 30000);
+const workerRequestTimeoutMs = Number(process.env.WEBHOOK_TIMEOUT_MS || 6000);
+
+function retryDelayMs(attemptCount) {
+  const exp = Math.min(attemptCount, 6);
+  return workerBaseBackoffMs * (2 ** exp);
+}
+
+function defaultWaitTimeoutMs() {
+  const initialClaimBudget = workerPollMs * 2;
+  const firstAttemptBudget = workerRequestTimeoutMs;
+  const firstRetryDelayBudget = retryDelayMs(1);
+  const disabledRetryClaimBudget = workerPollMs * 2;
+  const disabledRetryAttemptBudget = workerRequestTimeoutMs;
+  const stabilizationBudget = Math.max(workerPollMs * 2, 2500);
+  const jitterBudget = 10000;
+
+  return Math.max(
+    30000,
+    initialClaimBudget
+      + firstAttemptBudget
+      + firstRetryDelayBudget
+      + disabledRetryClaimBudget
+      + disabledRetryAttemptBudget
+      + stabilizationBudget
+      + jitterBudget
+  );
+}
+
+const waitTimeoutMs = Number(process.env.WEBHOOK_WAIT_TIMEOUT_MS || defaultWaitTimeoutMs());
 const artifactDir = process.env.WEBHOOK_ARTIFACT_DIR || '';
 const disableEndpointOnExit = process.env.WEBHOOK_DISABLE_ENDPOINT_ON_EXIT !== '0';
 
@@ -128,6 +158,12 @@ let endpointId = null;
 
 try {
   ({ workspaceId, projectId } = await seedWorkspaceProject());
+  if (!Number.isFinite(maxAttempts) || maxAttempts < 2) {
+    throw new Error('WEBHOOK_MAX_ATTEMPTS must be >= 2 for disable-after-queue smoke');
+  }
+  if (!Number.isFinite(waitTimeoutMs) || waitTimeoutMs < 1000) {
+    throw new Error('WEBHOOK_WAIT_TIMEOUT_MS must be >= 1000 when provided');
+  }
 
   const target = process.env.WEBHOOK_DISABLED_RETRY_TARGET_URL || 'http://127.0.0.1:9/hook';
   const endpoint = await createEndpoint(workspaceId, target, 'run.finished', 'disable-after-queue-secret');
