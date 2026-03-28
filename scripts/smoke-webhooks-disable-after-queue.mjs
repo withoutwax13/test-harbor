@@ -228,8 +228,13 @@ try {
     }
   };
   const artifactPath = await maybeWriteArtifact(output);
-  if (artifactPath) output.artifactPath = artifactPath;
-  console.log(JSON.stringify(output, null, 2));
+  if (artifactPath) {
+    const withPath = { ...output, artifactPath };
+    await fs.writeFile(artifactPath, JSON.stringify(withPath, null, 2));
+    console.log(JSON.stringify(withPath, null, 2));
+  } else {
+    console.log(JSON.stringify(output, null, 2));
+  }
 } finally {
   await cleanupWebhookSmokeSeededData({
     organizationId,
