@@ -16,7 +16,8 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 
 async function assertWebhookApiRoutesAvailable() {
-  const probeUrl = `${apiBase}/v1/webhook-endpoints?workspaceId=route-probe`;
+  const probeWorkspaceId = '00000000-0000-0000-0000-000000000000';
+  const probeUrl = `${apiBase}/v1/webhook-endpoints?workspaceId=${probeWorkspaceId}`;
   const res = await fetch(probeUrl, {
     method: 'GET',
     headers: {
