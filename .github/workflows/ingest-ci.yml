@@ -48,6 +48,10 @@ jobs:
       - name: End-to-end smoke
         run: npm run smoke:all
 
+      - name: Webhook route contract
+        if: env.RUN_WEBHOOK_SMOKES == '1'
+        run: npm run smoke:webhooks:route-contract
+
       - name: Webhook smoke suite
         if: env.RUN_WEBHOOK_SMOKES == '1'
         run: npm run smoke:webhooks:suite
