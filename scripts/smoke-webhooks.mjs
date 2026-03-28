@@ -15,6 +15,7 @@ import {
 
 const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
 const apiAuthToken = process.env.API_AUTH_TOKEN || '';
+const ingestAuthToken = process.env.INGEST_AUTH_TOKEN || '';
 
 const mockPort = Number(process.env.WEBHOOK_MOCK_PORT || 5099);
 const mockPath = process.env.WEBHOOK_MOCK_PATH || '/hook';

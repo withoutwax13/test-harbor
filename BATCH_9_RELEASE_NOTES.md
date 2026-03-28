@@ -7,9 +7,9 @@
 - Shared polling utilities and timing diagnostics for flake resistance
 
 ## Commit Placeholders
-- `<commit-hash-1>` CI and webhook smoke utility updates
-- `<commit-hash-2>` Safe teardown and auth negative-path expansion
-- `<commit-hash-3>` Release notes and final wiring
+- `55bd282` Improve webhook smoke polling diagnostics (B9 utility hardening and suite outputs)
+- `a4f9130` Add safe webhook smoke cleanup and auth checks (B9 hygiene + auth-negative)
+- `be70c3c` Add Batch 9 release notes
 
 ## Commands
 ```bash
