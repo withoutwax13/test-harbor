@@ -149,6 +149,19 @@ app.patch('/v1/projects/:id', async (request, reply) => {
   return { item: rows[0] };
 });
 
+app.delete('/v1/projects/:id', async (request, reply) => {
+  const { id } = request.params;
+  const { rows } = await query(
+    `delete from projects
+     where id = $1
+     returning id`,
+    [id]
+  );
+
+  if (!rows.length) return reply.code(404).send({ error: 'not_found' });
+  return reply.code(204).send();
+});
+
 
 app.get('/v1/projects/:id/latest-run', async (request, reply) => {
   const { id } = request.params;
@@ -296,6 +309,19 @@ app.patch('/v1/webhook-endpoints/:id', async (request, reply) => {
   return { item: rows[0] };
 });
 
+app.delete('/v1/webhook-endpoints/:id', async (request, reply) => {
+  const { id } = request.params;
+  const { rows } = await query(
+    `delete from webhook_endpoints
+     where id = $1
+     returning id`,
+    [id]
+  );
+
+  if (!rows.length) return reply.code(404).send({ error: 'not_found' });
+  return reply.code(204).send();
+});
+
 app.get('/v1/webhook-deliveries', async (request, reply) => {
   const { workspaceId, status, limit = 50 } = request.query || {};
   if (!workspaceId) return reply.code(400).send({ error: 'workspaceId is required' });
@@ -373,6 +399,19 @@ app.get('/v1/runs/:id', async (request, reply) => {
     tests: tests.rows,
     artifacts: artifacts.rows
   };
+});
+
+app.delete('/v1/workspaces/:id', async (request, reply) => {
+  const { id } = request.params;
+  const { rows } = await query(
+    `delete from workspaces
+     where id = $1
+     returning id`,
+    [id]
+  );
+
+  if (!rows.length) return reply.code(404).send({ error: 'not_found' });
+  return reply.code(204).send();
 });
 
 app.setErrorHandler((error, _req, reply) => {

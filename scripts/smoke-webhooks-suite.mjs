@@ -4,6 +4,7 @@ import path from 'node:path';
 
 const outDir = path.resolve(process.env.WEBHOOK_ARTIFACT_DIR || 'artifacts/webhooks');
 const includeClearSecret = process.env.WEBHOOK_INCLUDE_CLEAR_SECRET !== '0';
+const cleanupMode = (process.env.WEBHOOK_SEEDED_DATA_MODE || 'keep').toLowerCase();
 
 function runNode(script) {
   return new Promise((resolve, reject) => {
@@ -44,6 +45,7 @@ const disableAfterQueue = await runNode('scripts/smoke-webhooks-disable-after-qu
 const combined = {
   ok: true,
   generatedAt: new Date().toISOString(),
+  cleanupMode,
   delivered,
   dead,
   disableAfterQueue,

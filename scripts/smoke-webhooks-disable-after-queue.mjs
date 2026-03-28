@@ -1,6 +1,12 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {
+  assertWebhookApiRoutesAvailable,
+  cleanupWebhookSmokeSeededData,
+  getWebhookSmokeCleanupSettings,
+  jsonFetch
+} from './webhook-smoke-helpers.mjs';
 
 const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
 const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
@@ -40,7 +46,7 @@ function defaultWaitTimeoutMs() {
 
 const waitTimeoutMs = Number(process.env.WEBHOOK_WAIT_TIMEOUT_MS || defaultWaitTimeoutMs());
 const artifactDir = process.env.WEBHOOK_ARTIFACT_DIR || '';
-const disableEndpointOnExit = process.env.WEBHOOK_DISABLE_ENDPOINT_ON_EXIT !== '0';
+const cleanupSettings = getWebhookSmokeCleanupSettings();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -57,26 +63,6 @@ async function maybeWriteArtifact(payload) {
   const file = path.join(outDir, `webhook-smoke-${artifactStamp()}-disable-after-queue.json`);
   await fs.writeFile(file, JSON.stringify(payload, null, 2));
   return file;
-}
-
-async function jsonFetch(url, init = {}, authToken = '') {
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      'content-type': 'application/json',
-      ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
-      ...(init?.headers || {})
-    }
-  });
-  const text = await res.text();
-  let body;
-  try {
-    body = text ? JSON.parse(text) : {};
-  } catch {
-    body = { raw: text };
-  }
-  if (!res.ok) throw new Error(`${url} ${res.status} ${JSON.stringify(body)}`);
-  return body;
 }
 
 async function postIngest(type, payload, idempotencyKey = crypto.randomUUID()) {
@@ -157,6 +143,7 @@ let projectId = null;
 let endpointId = null;
 
 try {
+  await assertWebhookApiRoutesAvailable();
   ({ workspaceId, projectId } = await seedWorkspaceProject());
   if (!Number.isFinite(maxAttempts) || maxAttempts < 2) {
     throw new Error('WEBHOOK_MAX_ATTEMPTS must be >= 2 for disable-after-queue smoke');
@@ -259,6 +246,7 @@ try {
     deliveryId: final.id,
     notificationEventId: final.notification_event_id,
     target,
+    cleanupMode: cleanupSettings.seededDataMode,
     finalDelivery: {
       status: final.status,
       attemptCount: final.attempt_count,
@@ -274,7 +262,11 @@ try {
   if (artifactPath) output.artifactPath = artifactPath;
   console.log(JSON.stringify(output, null, 2));
 } finally {
-  if (endpointId && disableEndpointOnExit) {
-    await disableEndpoint(endpointId).catch(() => {});
-  }
+  await cleanupWebhookSmokeSeededData({
+    workspaceId,
+    projectId,
+    endpointId,
+    disableEndpoint,
+    log: (message) => console.error(message)
+  });
 }

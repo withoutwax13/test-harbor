@@ -2,6 +2,12 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {
+  assertWebhookApiRoutesAvailable,
+  cleanupWebhookSmokeSeededData,
+  getWebhookSmokeCleanupSettings,
+  jsonFetch
+} from './webhook-smoke-helpers.mjs';
 
 const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
 const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
@@ -33,52 +39,9 @@ function defaultWaitTimeoutMs() {
 
 const waitTimeoutMs = Number(process.env.WEBHOOK_WAIT_TIMEOUT_MS || defaultWaitTimeoutMs());
 const artifactDir = process.env.WEBHOOK_ARTIFACT_DIR || '';
-const disableEndpointOnExit = process.env.WEBHOOK_DISABLE_ENDPOINT_ON_EXIT !== '0';
+const cleanupSettings = getWebhookSmokeCleanupSettings();
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-
-
-async function assertWebhookApiRoutesAvailable() {
-  const probeWorkspaceId = '00000000-0000-0000-0000-000000000000';
-  const probeUrl = `${apiBase}/v1/webhook-endpoints?workspaceId=${probeWorkspaceId}`;
-  const res = await fetch(probeUrl, {
-    method: 'GET',
-    headers: {
-      ...(apiAuthToken ? { authorization: `Bearer ${apiAuthToken}` } : {})
-    }
-  });
-
-  if (res.status === 404) {
-    throw new Error(
-      [
-        `Webhook API route missing at ${probeUrl} (404).`,
-        'This usually means api container is stale or wrong target is bound to API_BASE_URL.',
-        'Run: docker compose build --no-cache api ingest worker && docker compose up -d postgres redis api ingest worker'
-      ].join(' ')
-    );
-  }
-
-  if (res.status >= 500) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Webhook API route probe failed ${res.status}: ${body}`);
-  }
-}
-
-async function jsonFetch(url, init = {}, authToken = '') {
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      'content-type': 'application/json',
-      ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
-      ...(init?.headers || {})
-    }
-  });
-  const text = await res.text();
-  let body;
-  try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
-  if (!res.ok) throw new Error(`${url} ${res.status} ${JSON.stringify(body)}`);
-  return body;
-}
 
 async function postIngest(type, payload, idempotencyKey = crypto.randomUUID()) {
   return jsonFetch(`${ingestBase}/v1/ingest/events`, {
@@ -286,6 +249,7 @@ try {
     waitTimeoutMs,
     signatureSeen,
     mockReceived: received,
+    cleanupMode: cleanupSettings.seededDataMode,
     finalDelivery: {
       id: final.id,
       status: final.status,
@@ -304,8 +268,12 @@ try {
   if (artifactPath) output.artifactPath = artifactPath;
   console.log(JSON.stringify(output, null, 2));
 } finally {
-  if (endpointId && disableEndpointOnExit) {
-    await disableEndpoint(endpointId).catch(() => {});
-  }
+  await cleanupWebhookSmokeSeededData({
+    workspaceId,
+    projectId,
+    endpointId,
+    disableEndpoint,
+    log: (message) => console.error(message)
+  });
   await new Promise((resolve) => server.close(resolve));
 }

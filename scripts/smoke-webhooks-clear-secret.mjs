@@ -1,5 +1,11 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
+import {
+  assertWebhookApiRoutesAvailable,
+  cleanupWebhookSmokeSeededData,
+  getWebhookSmokeCleanupSettings,
+  jsonFetch
+} from './webhook-smoke-helpers.mjs';
 
 const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
 const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
@@ -10,25 +16,9 @@ const mockPort = Number(process.env.WEBHOOK_MOCK_PORT || 5099);
 const mockPath = process.env.WEBHOOK_MOCK_PATH || '/hook';
 const webhookTargetHost = process.env.WEBHOOK_TARGET_HOST || 'host.docker.internal';
 const waitTimeoutMs = Number(process.env.WEBHOOK_WAIT_TIMEOUT_MS || 45000);
-const disableEndpointOnExit = process.env.WEBHOOK_DISABLE_ENDPOINT_ON_EXIT !== '0';
+const cleanupSettings = getWebhookSmokeCleanupSettings();
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-
-async function jsonFetch(url, init = {}, authToken = '') {
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      'content-type': 'application/json',
-      ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
-      ...(init?.headers || {})
-    }
-  });
-  const text = await res.text();
-  let body;
-  try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
-  if (!res.ok) throw new Error(`${url} ${res.status} ${JSON.stringify(body)}`);
-  return body;
-}
 
 async function postIngest(type, payload, idempotencyKey = crypto.randomUUID()) {
   return jsonFetch(`${ingestBase}/v1/ingest/events`, {
@@ -130,10 +120,13 @@ const server = http.createServer(async (req, res) => {
 
 await new Promise((resolve) => server.listen(mockPort, '0.0.0.0', resolve));
 
+let workspaceId = null;
+let projectId = null;
 let endpointId = null;
 
 try {
-  const { workspaceId, projectId } = await seedWorkspaceProject();
+  await assertWebhookApiRoutesAvailable();
+  ({ workspaceId, projectId } = await seedWorkspaceProject());
   const target = `http://${webhookTargetHost}:${mockPort}${mockPath}`;
   const endpoint = await createEndpoint(workspaceId, target, 'run.finished', 'clear-secret-smoke');
   endpointId = endpoint?.item?.id;
@@ -178,6 +171,7 @@ try {
     workspaceId,
     projectId,
     endpointId,
+    cleanupMode: cleanupSettings.seededDataMode,
     checks: {
       firstHasSignature,
       secondHasSignature,
@@ -186,8 +180,12 @@ try {
     }
   }, null, 2));
 } finally {
-  if (endpointId && disableEndpointOnExit) {
-    await disableEndpoint(endpointId).catch(() => {});
-  }
+  await cleanupWebhookSmokeSeededData({
+    workspaceId,
+    projectId,
+    endpointId,
+    disableEndpoint,
+    log: (message) => console.error(message)
+  });
   await new Promise((resolve) => server.close(resolve));
 }
