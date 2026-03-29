@@ -72,11 +72,19 @@ export function installTestHarborReplayHooks(options = {}) {
     const specPath = getSpecPath();
     return cy
       .task('testharbor:replay', { specPath, events }, { log: false })
-      .catch((error) => {
-        // eslint-disable-next-line no-console
-        console.warn('[testharbor] replay flush failed', error?.message || error);
-        return null;
-      });
+      .then(
+        () => null,
+        (error) => {
+          // restore events for next flush attempt (bounded by maxEvents)
+          queue.unshift(...events);
+          if (queue.length > maxEvents) {
+            queue.splice(0, queue.length - maxEvents);
+          }
+          // eslint-disable-next-line no-console
+          console.warn('[testharbor] replay flush failed', error?.message || error);
+          return null;
+        }
+      );
   }
 
   Cypress.on('command:end', (command) => {
