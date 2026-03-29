@@ -40,15 +40,31 @@ npm run smoke:all
 1. Open `http://localhost:3000/login`.
 2. Sign in with a local name and email.
 3. Use `/app/onboarding` to create or select a workspace and project.
-4. Copy the connect snippet into a shell or CI job.
-5. Use `/app/connect` to inspect API, ingest, and worker health, then queue a test event.
-6. Use `/app/runs` and `/app/runs/:id` for browser triage.
-7. Use `/app/admin` for webhook endpoint and delivery basics.
+4. Mint a **project ingest token** (shown once on creation, then stored as hash+hint only).
+5. Copy the Cypress-first connect snippet and emit `run.started`.
+6. Use `/app/connect` to inspect API, ingest, and worker health, then queue a test event.
+7. Use `/app/team` for member add/update/remove and role management.
+8. Use `/app/runs`, `/app/runs/:id`, and `/app/tests/:id/history` for triage (including date filters).
+9. Use `/app/admin` for webhook endpoint management, secret rotate/clear, and grouped delivery timeline.
 
 Browser smoke:
 
 ```bash
 npm run smoke:web-shell
+```
+
+Parity evidence pack:
+
+```bash
+npm run parity:pack
+```
+
+Optional shell capture when web is reachable and you have a session cookie:
+
+```bash
+PARITY_CAPTURE_BASE_URL=http://localhost:3000 \
+PARITY_CAPTURE_COOKIE='th_session=...' \
+npm run parity:pack
 ```
 
 ## Auth (optional)
