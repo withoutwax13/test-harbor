@@ -473,7 +473,7 @@ function renderSnippet(shell, { tokens = [], latestRun = null, newTokenBundle = 
     return '<div class="empty-state"><h3>Connect snippet unavailable</h3><p>Create or select a workspace and project first.</p></div>';
   }
 
-  const activeToken = newTokenBundle?.token || (tokens.find((item) => formatTokenState(item) === 'active') ? '${TESTHARBOR_INGEST_TOKEN}' : '<create-a-project-token>');
+  const activeToken = newTokenBundle?.token || (tokens.find((item) => formatTokenState(item) === 'active') ? '\${TESTHARBOR_INGEST_TOKEN}' : '<create-a-project-token>');
   const snippet = `# Only one ID is required in cypress.config: projectId
 # Token and ingest URL come from env (CI secret + URL)
 export TESTHARBOR_INGEST_URL="${INGEST_PUBLIC_BASE_URL}/v1/ingest/events"
