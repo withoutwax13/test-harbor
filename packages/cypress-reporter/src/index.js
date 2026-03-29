@@ -34,6 +34,25 @@ function safeFileSize(filePath) {
   }
 }
 
+function readBinaryAsBase64(filePath, maxBytes = Number(process.env.TESTHARBOR_ARTIFACT_MAX_BASE64_BYTES || 100000000)) {
+  if (!filePath) return null;
+  try {
+    const buffer = fs.readFileSync(filePath);
+    const max = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : Number.MAX_SAFE_INTEGER;
+    if (!buffer || buffer.length === 0 || buffer.length > max) {
+      return { buffer: null, byteSize: buffer.length || 0 };
+    }
+    return {
+      buffer,
+      byteSize: buffer.length,
+      contentBase64: buffer.toString('base64'),
+      checksum: crypto.createHash('sha256').update(buffer).digest('hex')
+    };
+  } catch {
+    return null;
+  }
+}
+
 function stableTestKey(specPath, title) {
   return crypto.createHash('sha1').update(`${specPath}::${title}`).digest('hex');
 }
@@ -219,6 +238,66 @@ export function setupTestHarbor(on, config, options = {}) {
     totalSpecs: 0
   };
 
+  const artifactMaxBytes = Number(
+    process.env.TESTHARBOR_ARTIFACT_MAX_BASE64_BYTES || 100000000
+  );
+  const replayQueue = [];
+
+  function pushReplayEvent(event = {}) {
+    if (!event || typeof event !== 'object') return;
+    const enriched = {
+      type: asTrimmedString(event.type) || 'replay.event',
+      ts: toIso(event.ts || event.at || new Date()),
+      title: asTrimmedString(event.title || event.name) || null,
+      detail: event.detail || null,
+      command: event.command || null,
+      payload: event.payload || null,
+      console: Array.isArray(event.console) ? event.console : [],
+      network: Array.isArray(event.network) ? event.network : [],
+      domSnapshot: asTrimmedString(event.domSnapshot) || null
+    };
+    replayQueue.push(enriched);
+  }
+
+  async function flushReplayChunk(context = {}) {
+    if (!replayQueue.length) return;
+    const events = replayQueue.splice(0, replayQueue.length);
+    await sendSafe(INGEST_EVENT_TYPES.REPLAY_CHUNK, {
+      runId,
+      ...(context.specRunId ? { specRunId: context.specRunId } : {}),
+      ...(context.testResultId ? { testResultId: context.testResultId } : {}),
+      events
+    });
+  }
+
+  async function registerArtifact(opts = {}) {
+    const artifactId = opts.artifactId || crypto.randomUUID();
+    const type = asTrimmedString(opts.type) || 'artifact';
+    const filePath = asTrimmedString(opts.filePath);
+    const payload = {
+      artifactId,
+      runId,
+      ...(opts.specRunId ? { specRunId: opts.specRunId } : {}),
+      ...(opts.testResultId ? { testResultId: opts.testResultId } : {}),
+      type,
+      storageKey: asTrimmedString(opts.storageKey) || `${type}/${Date.now()}.bin`,
+      ...(opts.contentType ? { contentType: opts.contentType } : {}),
+      ...(opts.byteSize != null ? { byteSize: opts.byteSize } : {}),
+      ...(opts.checksum ? { checksum: opts.checksum } : {})
+    };
+
+    const file = readBinaryAsBase64(filePath, artifactMaxBytes);
+    if (file && file.contentBase64) {
+      payload.contentBase64 = file.contentBase64;
+      payload.byteSize = file.byteSize;
+      payload.checksum = file.checksum;
+    }
+
+    await sendSafe(INGEST_EVENT_TYPES.ARTIFACT_REGISTERED, payload);
+    return { artifactId, payload, uploaded: Boolean(file && file.contentBase64) };
+  }
+
+
   const sendSafe = async (type, payload) => {
     try {
       await client.send(type, payload);
@@ -232,6 +311,28 @@ export function setupTestHarbor(on, config, options = {}) {
   on('task', {
     'testharbor:log'(entry) {
       // Keep API stable for tests that want to emit custom logs through cy.task().
+      pushReplayEvent({ type: 'log', title: 'cy.task testharbor:log', detail: entry });
+      return entry || null;
+    },
+    'testharbor:replay' (entry) {
+      if (entry && typeof entry === 'object') {
+        const specRunId = findSpecRunId(specRunIds, asTrimmedString(entry.specPath)) || null;
+        const events = Array.isArray(entry.events)
+          ? entry.events
+          : [entry];
+        for (const event of events) {
+          pushReplayEvent({
+            ...event,
+            title: event?.title || event?.name,
+            ts: toIso(event?.ts || entry?.at || new Date())
+          });
+        }
+        void sendSafe(INGEST_EVENT_TYPES.REPLAY_CHUNK, {
+          runId,
+          ...(specRunId ? { specRunId } : {}),
+          events
+        }).catch(() => {});
+      }
       return entry || null;
     }
   });
@@ -268,14 +369,26 @@ export function setupTestHarbor(on, config, options = {}) {
     const specPath = asTrimmedString(details?.specName) || asTrimmedString(details?.path) || 'unknown-spec';
     const specRunId = findSpecRunId(specRunIds, specPath);
 
-    await sendSafe(INGEST_EVENT_TYPES.ARTIFACT_REGISTERED, {
+    const storageKey = asTrimmedString(details?.path) || `screenshots/${Date.now()}.png`;
+    await registerArtifact({
       artifactId: crypto.randomUUID(),
       runId,
-      ...(specRunId ? { specRunId } : {}),
+      specRunId,
       type: 'screenshot',
-      storageKey: asTrimmedString(details?.path) || `screenshots/${Date.now()}.png`,
+      storageKey,
       contentType: 'image/png',
-      byteSize: safeFileSize(details?.path)
+      byteSize: safeFileSize(details?.path),
+      filePath: details?.path
+    });
+
+    pushReplayEvent({
+      type: 'replay.screenshot',
+      title: 'screenshot',
+      detail: `screenshot ${storageKey}`,
+      command: storageKey,
+      payload: {
+        path: storageKey
+      }
     });
 
     return details;
@@ -348,28 +461,42 @@ export function setupTestHarbor(on, config, options = {}) {
 
     const screenshots = Array.isArray(results?.screenshots) ? results.screenshots : [];
     for (const shot of screenshots) {
-      await sendSafe(INGEST_EVENT_TYPES.ARTIFACT_REGISTERED, {
+      const shotPath = asTrimmedString(shot?.path) || asTrimmedString(shot?.name);
+      const storageKey = shotPath || `screenshots/${Date.now()}.png`;
+      await registerArtifact({
         artifactId: crypto.randomUUID(),
         runId,
         specRunId,
         type: 'screenshot',
-        storageKey: asTrimmedString(shot?.path) || asTrimmedString(shot?.name) || `screenshots/${Date.now()}.png`,
+        storageKey,
         contentType: 'image/png',
-        byteSize: safeFileSize(shot?.path)
+        filePath: shotPath
       });
     }
 
     if (results?.video) {
-      await sendSafe(INGEST_EVENT_TYPES.ARTIFACT_REGISTERED, {
+      const videoPath = asTrimmedString(results.video);
+      await registerArtifact({
         artifactId: crypto.randomUUID(),
         runId,
         specRunId,
         type: 'video',
-        storageKey: String(results.video),
+        storageKey: videoPath || `videos/${Date.now()}.mp4`,
         contentType: 'video/mp4',
-        byteSize: safeFileSize(results.video)
+        filePath: videoPath
       });
+      if (videoPath) {
+        pushReplayEvent({
+          type: 'replay.video',
+          title: 'video',
+          detail: `video ${videoPath}`,
+          command: 'video-artifact',
+          payload: { path: videoPath }
+        });
+      }
     }
+
+    await flushReplayChunk({ specRunId });
 
     await sendSafe(INGEST_EVENT_TYPES.SPEC_FINISHED, {
       specRunId,
@@ -382,6 +509,7 @@ export function setupTestHarbor(on, config, options = {}) {
 
   on('after:run', async (results) => {
     const totalSpecs = toNumber(results?.totalSuites, runMetrics.totalSpecs || specRunIds.size);
+    await flushReplayChunk();
     const totalTests = toNumber(results?.totalTests, runMetrics.totalTests);
     const passCount = toNumber(results?.totalPassed, runMetrics.passCount);
     const failCount = toNumber(results?.totalFailed, runMetrics.failCount);

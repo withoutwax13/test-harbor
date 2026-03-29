@@ -176,6 +176,17 @@ async function apiFetch(pathname, { method = 'GET', token = '', body = null } = 
   return payload;
 }
 
+async function apiFetchRaw(pathname, { method = 'GET', token = '', headers = {}, body } = {}) {
+  return fetch(`${API_BASE_URL}${pathname}`, {
+    method,
+    headers: {
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...headers
+    },
+    ...(body !== undefined ? { body } : {})
+  });
+}
+
 function jsonRedirect(reply, redirectTo, cookies = []) {
   if (cookies.length) setCookies(reply, cookies);
   return reply.send({ ok: true, redirectTo });
@@ -879,13 +890,29 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
         </details>`).join('')}</div>` : '<div class="empty-state"><h3>No error logs captured</h3><p>When test.result events include error_message/stacktrace, details appear here.</p></div>'}
       </section>
       <section class="panel">
-        <div class="panel-header"><div><h2>Artifacts</h2><p>Screenshots/videos are listed here once registered by the Cypress reporter helper.</p></div></div>
+        <div class="panel-header"><div><h2>Artifacts</h2><p>Screenshots/videos render inline when binary content is uploaded by the reporter.</p></div></div>
         <div class="metrics-grid">
           ${metric('Media artifacts', mediaArtifacts.length)}
           ${metric('Screenshots', screenshotCount)}
           ${metric('Videos', videoCount)}
           ${metric('All artifacts', artifacts.length)}
         </div>
+        ${mediaArtifacts.length ? `<div class="grid two-up artifact-preview-grid">
+          ${mediaArtifacts.slice(0, 24).map((artifact) => {
+            const contentType = String(artifact.content_type || '').toLowerCase();
+            const type = String(artifact.type || '').toLowerCase();
+            const isVideo = type.includes('video') || contentType.startsWith('video/');
+            const inlineUrl = `/app/artifacts/${artifact.id}/content`;
+            return `<article class="panel artifact-preview-card">
+              <div class="panel-header compact"><strong>${escapeHtml(artifact.type)}</strong><small>${escapeHtml(formatDate(artifact.created_at))}</small></div>
+              ${isVideo
+                ? `<video controls preload="metadata" src="${escapeHtml(inlineUrl)}"></video>`
+                : `<img loading="lazy" src="${escapeHtml(inlineUrl)}" alt="${escapeHtml(artifact.type)}" />`}
+              <small>${escapeHtml(artifact.content_type || 'application/octet-stream')} · ${escapeHtml(formatBytes(artifact.byte_size))}</small>
+              <a class="text-link" href="/app/artifacts/${artifact.id}">Details</a>
+            </article>`;
+          }).join('')}
+        </div>` : '<div class="empty-state"><h3>No inline media yet</h3><p>Reporter must upload artifact bytes (not metadata only) for in-app previews.</p></div>'}
         ${artifacts.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Type</th><th>Content type</th><th>Size</th><th>Created</th><th></th></tr></thead>
           <tbody>
@@ -897,10 +924,18 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
               <td><a class="text-link" href="/app/artifacts/${artifact.id}">View</a></td>
             </tr>`).join('')}
           </tbody>
-        </table></div>` : '<div class="empty-state"><h3>No artifacts</h3><p>Artifacts appear here after the ingest client registers them.</p></div>'}
+        </table></div>` : '<div class="empty-state"><h3>No artifacts</h3><p>Artifacts appear here after reporter registration/upload.</p></div>'}
       </section>
       <section class="panel">
-        <div class="panel-header"><div><h2>Replay-like timeline</h2><p>Event timeline for run/spec/test/artifact activity (lightweight Cypress Cloud-style trace).</p></div></div>
+        <div class="panel-header"><div><h2>Replay</h2><p>Interactive run replay (DOM snapshots, console logs, and network activity when reporter replay hooks are enabled).</p></div>
+          <a class="button button-secondary" href="/app/runs/${item.id}/replay">Open replay</a>
+        </div>
+        <div class="metrics-grid">
+          ${metric('Replay events', Number(runDetail.replay?.event_count || 0))}
+          ${metric('First event', formatDate(runDetail.replay?.first_event_at))}
+          ${metric('Last event', formatDate(runDetail.replay?.last_event_at))}
+          ${metric('Timeline entries', timeline.length)}
+        </div>
         ${timeline.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Time</th><th>Event</th><th>Title</th><th>Detail</th></tr></thead>
           <tbody>
@@ -911,12 +946,130 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
               <td>${escapeHtml(entry.detail || '')}</td>
             </tr>`).join('')}
           </tbody>
-        </table></div>` : '<div class="empty-state"><h3>No timeline events</h3><p>Events appear after run/spec/test/artifact ingest activity.</p></div>'}
+        </table></div>` : '<div class="empty-state"><h3>No timeline events</h3><p>Events appear after run/spec/test/artifact/replay ingest activity.</p></div>'}
       </section>`
   });
 }
 
+function renderRunReplayPage(shell, replayDetail, runId) {
+  const events = Array.isArray(replayDetail?.events) ? replayDetail.events : [];
+  const normalized = events.map((row) => {
+    const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+    return {
+      id: row.id,
+      ts: row.event_ts || row.created_at || payload.ts || payload.at || null,
+      type: row.event_type || payload.type || 'replay.event',
+      domSnapshot: typeof payload.domSnapshot === 'string' ? payload.domSnapshot : null,
+      console: Array.isArray(payload.console) ? payload.console : (payload.console ? [payload.console] : []),
+      network: Array.isArray(payload.network) ? payload.network : (payload.network ? [payload.network] : []),
+      command: payload.command || null,
+      title: payload.title || payload.name || null,
+      detail: payload.detail || payload.message || null,
+      payload
+    };
+  });
+
+  const replayJson = JSON.stringify(normalized).replaceAll('<', '\u003c');
+
+  return renderLayout({
+    title: `Replay ${runId.slice(0, 8)}`,
+    shell,
+    currentPath: '/app/runs',
+    content: `<section class="hero compact">
+        <div>
+          <p class="eyebrow">Replay</p>
+          <h2>Run ${escapeHtml(runId)} replay</h2>
+          <p>Step through captured DOM snapshots with synchronized console and network events.</p>
+        </div>
+        <div class="hero-metrics">
+          ${summaryCard('Captured events', String(normalized.length), normalized.length ? `From ${formatDate(normalized[0]?.ts)} to ${formatDate(normalized.at(-1)?.ts)}` : 'No replay events yet')}
+          ${summaryCard('Console entries', String(normalized.reduce((n, e) => n + (e.console?.length || 0), 0)), 'Aggregated from replay chunks')}
+          ${summaryCard('Network entries', String(normalized.reduce((n, e) => n + (e.network?.length || 0), 0)), 'HAR-like request metadata')}
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Time travel</h2>
+            <p>Use slider or click any step to reconstruct the captured browser state.</p>
+          </div>
+          <a class="button button-secondary" href="/app/runs/${escapeHtml(runId)}">Back to run detail</a>
+        </div>
+        ${normalized.length ? `<div class="stack">
+          <input id="replay-step" type="range" min="0" max="${Math.max(0, normalized.length - 1)}" value="0" />
+          <div class="grid two-up">
+            <div class="panel">
+              <div class="panel-header compact"><strong>Steps</strong><small id="replay-step-meta">0 / ${normalized.length}</small></div>
+              <div id="replay-step-list" class="stack" style="max-height: 320px; overflow: auto;"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-header compact"><strong>Reconstructed DOM</strong><small id="replay-event-title"></small></div>
+              <iframe id="replay-frame" style="width:100%; min-height:380px; border:1px solid var(--border); border-radius:12px;"></iframe>
+            </div>
+          </div>
+          <div class="grid two-up">
+            <div class="panel"><div class="panel-header compact"><strong>Console</strong></div><pre id="replay-console" class="code-block"></pre></div>
+            <div class="panel"><div class="panel-header compact"><strong>Network</strong></div><pre id="replay-network" class="code-block"></pre></div>
+          </div>
+        </div>` : '<div class="empty-state"><h3>No replay events found</h3><p>Enable reporter replay hooks in Cypress support file to capture DOM/network/console data.</p></div>'}
+      </section>
+      <script id="replay-data" type="application/json">${replayJson}</script>
+      <script>
+        (() => {
+          const dataNode = document.getElementById('replay-data');
+          if (!dataNode) return;
+          const events = JSON.parse(dataNode.textContent || '[]');
+          const slider = document.getElementById('replay-step');
+          const list = document.getElementById('replay-step-list');
+          const frame = document.getElementById('replay-frame');
+          const meta = document.getElementById('replay-step-meta');
+          const title = document.getElementById('replay-event-title');
+          const consoleNode = document.getElementById('replay-console');
+          const networkNode = document.getElementById('replay-network');
+          if (!slider || !list || !frame || !meta || !title || !consoleNode || !networkNode) return;
+
+          const renderList = () => {
+            list.innerHTML = events.map((event, idx) =>
+              '<button type="button" data-step="' +
+              idx +
+              '" class="button button-secondary" style="justify-content:flex-start; text-align:left; width:100%;">' +
+              (idx + 1) + '. ' + event.type + ' · ' + new Date(event.ts || Date.now()).toISOString() +
+              '</button>'
+            ).join('');
+            list.querySelectorAll('button[data-step]').forEach((button) => {
+              button.addEventListener('click', () => {
+                slider.value = button.dataset.step;
+                renderCurrent();
+              });
+            });
+          };
+
+          const renderCurrent = () => {
+            const idx = Number(slider.value || 0);
+            const event = events[idx] || {};
+            meta.textContent = idx + 1 + ' / ' + events.length;
+            title.textContent = (event.type || 'event') + ' @ ' + (event.ts || 'n/a');
+            const dom = event.domSnapshot || '<html><body style="font-family:sans-serif;padding:16px;"><h3>No DOM snapshot for this step</h3><p>' + (event.type || '') + '</p><pre>' + ((event.detail || '').replace(/[<>&]/g, '')) + '</pre></body></html>';
+            frame.srcdoc = dom;
+            consoleNode.textContent = JSON.stringify(event.console || [], null, 2) || '[]';
+            networkNode.textContent = JSON.stringify(event.network || [], null, 2) || '[]';
+          };
+
+          renderList();
+          slider.addEventListener('input', renderCurrent);
+          renderCurrent();
+        })();
+      </script>`
+  });
+}
+
 function renderArtifactPage(shell, detail) {
+  const contentType = String(detail?.item?.content_type || '').toLowerCase();
+  const type = String(detail?.item?.type || '').toLowerCase();
+  const isImage = type.includes('image') || contentType.startsWith('image/');
+  const isVideo = type.includes('video') || contentType.startsWith('video/');
+  const inlineUrl = `/app/artifacts/${detail?.item?.id || ''}/content`;
+
   return renderLayout({
     title: 'Artifact Viewer',
     shell,
@@ -924,19 +1077,33 @@ function renderArtifactPage(shell, detail) {
     content: `<section class="panel">
         <div class="panel-header">
           <div>
-            <h2>${escapeHtml(detail.item.type)}</h2>
-            <p>Signed download contract and metadata for artifact ${escapeHtml(detail.item.id)}.</p>
+            <h2>${escapeHtml(detail?.item?.type || 'artifact')}</h2>
+            <p>Artifact ${escapeHtml(detail?.item?.id || '')} for this run.</p>
           </div>
-          ${badge(detail.download.backend || 'unknown', 'neutral')}
+          ${badge(detail?.download?.backend || 'unknown', 'neutral')}
         </div>
         <div class="metrics-grid">
-          ${metric('Content type', detail.item.content_type || 'application/octet-stream')}
-          ${metric('Size', formatBytes(detail.item.byte_size))}
-          ${metric('Created', formatDate(detail.item.created_at))}
-          ${metric('Download expires', formatDate(detail.download.expiresAt))}
+          ${metric('Content type', detail?.item?.content_type || 'application/octet-stream')}
+          ${metric('Size', formatBytes(detail?.item?.byte_size))}
+          ${metric('Created', formatDate(detail?.item?.created_at))}
+          ${metric('Download expires', formatDate(detail?.download?.expiresAt))}
         </div>
-        <pre class="code-block">${escapeHtml(JSON.stringify(detail, null, 2))}</pre>
-        <p><a class="button button-secondary" target="_blank" rel="noreferrer" href="${escapeHtml(detail.download.url)}">Open signed download</a></p>
+        ${isImage || isVideo
+          ? `<div class="panel">
+              <div class="panel-header compact"><strong>Inline preview</strong></div>
+              ${isVideo
+                ? `<video controls preload="metadata" src="${escapeHtml(inlineUrl)}"></video>`
+                : `<img loading="lazy" src="${escapeHtml(inlineUrl)}" alt="${escapeHtml(detail?.item?.type || 'artifact')}" />`}
+              <div class="stack two-up" style="margin-top: 12px;">
+                <a class="button" href="${escapeHtml(inlineUrl)}" target="_blank" rel="noreferrer">Open media</a>
+                <a class="button button-secondary" href="${escapeHtml(inlineUrl)}" download>Download</a>
+              </div>
+            </div>`
+          : '<div class="empty-state"><h3>Inline preview not available for this artifact type.</h3></div>'}
+        <div class="panel">
+          <div class="panel-header compact"><strong>Artifact metadata</strong></div>
+          <pre class="code-block">${escapeHtml(JSON.stringify(detail, null, 2))}</pre>
+        </div>
       </section>`
   });
 }
@@ -1567,6 +1734,60 @@ app.get('/app/runs/:id', async (request, reply) => {
 });
 
 
+
+app.get('/app/runs/:id/replay', async (request, reply) => {
+  const shell = await loadShellData(request);
+  if (!shell.session) return requireSession(request, reply);
+
+  const replay = await apiFetch(`/v1/runs/${request.params.id}/replay`, { token: shell.session.token });
+  return reply.type('text/html').send(renderRunReplayPage(shell, replay, request.params.id));
+});
+
+app.get('/app/artifacts/:id/content', async (request, reply) => {
+  const shell = await loadShellData(request);
+  if (!shell.session) return requireSession(request, reply);
+
+  const artifactId = String(request.params.id);
+  const detail = await apiFetch(`/v1/artifacts/${artifactId}/sign-download`, { token: shell.session.token });
+
+  const signedUrl = String(detail?.download?.url || '');
+  let signedToken = '';
+  try {
+    const parsed = new URL(signedUrl);
+    signedToken = parsed.searchParams.get('token') || '';
+  } catch {
+    const fallbackQs = signedUrl.split('?')[1] || '';
+    if (fallbackQs) {
+      try {
+        const params = new URLSearchParams(fallbackQs);
+        signedToken = params.get('token') || '';
+      } catch {
+        signedToken = '';
+      }
+    }
+  }
+
+  if (!signedToken) {
+    return reply.code(404).send({ error: 'artifact_download_token_not_found' });
+  }
+
+  const backend = String(detail?.download?.backend || 'local');
+  const upstream = await apiFetchRaw(`/v1/artifacts/download/${artifactId}?token=${encodeURIComponent(signedToken)}&backend=${encodeURIComponent(backend)}`);
+
+  if (!upstream.ok) {
+    const text = await upstream.text();
+    return reply.code(upstream.status).send({ error: `artifact_download_failed_${upstream.status}`, message: text || 'download_failed' });
+  }
+
+  const bytes = await upstream.arrayBuffer();
+  const contentType = upstream.headers.get('content-type') || detail?.item?.content_type || 'application/octet-stream';
+  const contentLength = upstream.headers.get('content-length');
+
+  reply.code(200).header('content-type', contentType);
+  if (contentLength) reply.header('content-length', contentLength);
+  reply.header('cache-control', 'private, max-age=60');
+  return reply.send(Buffer.from(bytes));
+});
 
 app.get('/app/tests/:id/history', async (request, reply) => {
   const shell = await loadShellData(request);

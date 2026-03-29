@@ -43,6 +43,7 @@ const REQUIRED_FIELDS_BY_TYPE = {
   [INGEST_EVENT_TYPES.SPEC_FINISHED]: ['specRunId', 'status'],
   [INGEST_EVENT_TYPES.TEST_RESULT]: ['testResultId', 'specRunId', 'status'],
   [INGEST_EVENT_TYPES.ARTIFACT_REGISTERED]: ['artifactId', 'runId', 'type', 'storageKey'],
+  [INGEST_EVENT_TYPES.REPLAY_CHUNK]: ['runId', 'events'],
   [INGEST_EVENT_TYPES.HEARTBEAT]: ['runId']
 };
 
@@ -56,6 +57,14 @@ function validatePayloadShape(type, payload) {
   if (missing.length) {
     throw new ValidationError('payload_missing_required_fields', { type, missing });
   }
+
+  if (type === INGEST_EVENT_TYPES.REPLAY_CHUNK && !Array.isArray(payload.events)) {
+    throw new ValidationError('payload_invalid_events_array', { type });
+  }
+
+  if (type === INGEST_EVENT_TYPES.ARTIFACT_REGISTERED && payload.contentBase64 != null && typeof payload.contentBase64 !== 'string') {
+    throw new ValidationError('payload_invalid_artifact_content_base64', { type });
+  }
 }
 
 async function query(sql, params = []) {
@@ -67,6 +76,67 @@ async function query(sql, params = []) {
   }
 }
 
+function decodeBase64Content(value) {
+  if (!value || typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const direct = trimmed.startsWith('data:')
+    ? trimmed.slice(trimmed.indexOf(',') + 1)
+    : trimmed;
+
+  try {
+    return Buffer.from(direct, 'base64');
+  } catch {
+    return null;
+  }
+}
+
+function sanitizePayloadForReceipt(type, payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+
+  let clone;
+  try {
+    clone = JSON.parse(JSON.stringify(payload));
+  } catch {
+    return { note: 'payload_not_json_serializable' };
+  }
+
+  if (type === INGEST_EVENT_TYPES.ARTIFACT_REGISTERED && typeof clone.contentBase64 === 'string') {
+    clone.contentBase64Length = clone.contentBase64.length;
+    clone.contentBase64 = '[omitted]';
+  }
+
+  if (type === INGEST_EVENT_TYPES.REPLAY_CHUNK && Array.isArray(clone.events)) {
+    clone.events = clone.events.map((event) => {
+      if (!event || typeof event !== 'object') return event;
+      const out = { ...event };
+      if (typeof out.domSnapshot === 'string') {
+        out.domSnapshotLength = out.domSnapshot.length;
+        out.domSnapshot = '[omitted]';
+      }
+      return out;
+    });
+  }
+
+  return clone;
+}
+
+async function upsertArtifactBlob({ artifactId, contentBuffer, contentType = null, byteSize = null, checksum = null }) {
+  if (!artifactId || !Buffer.isBuffer(contentBuffer) || !contentBuffer.length) return;
+  const size = Number.isFinite(Number(byteSize)) ? Number(byteSize) : contentBuffer.length;
+  await query(
+    `insert into artifact_blobs(artifact_id, content, content_type, byte_size, checksum, created_at, updated_at)
+     values($1, $2, $3, $4, $5, now(), now())
+     on conflict (artifact_id) do update set
+       content = excluded.content,
+       content_type = excluded.content_type,
+       byte_size = excluded.byte_size,
+       checksum = excluded.checksum,
+       updated_at = now()`,
+    [artifactId, contentBuffer, contentType, size, checksum]
+  );
+}
 
 
 function hashText(value) {
@@ -175,12 +245,14 @@ async function withIdempotency(idempotencyKey, eventType, payload, handler) {
   const existing = await query('select id, status from ingest_events where idempotency_key = $1', [idempotencyKey]);
   if (existing.rows.length) return { duplicate: true, status: existing.rows[0].status };
 
+  const receiptPayload = sanitizePayloadForReceipt(eventType, payload);
+
   try {
     await handler();
     await query(
       `insert into ingest_events(idempotency_key, event_type, payload, status)
        values($1, $2, $3::jsonb, 'processed')`,
-      [idempotencyKey, eventType, JSON.stringify(payload)]
+      [idempotencyKey, eventType, JSON.stringify(receiptPayload)]
     );
     return { duplicate: false, status: 'processed' };
   } catch (err) {
@@ -189,7 +261,7 @@ async function withIdempotency(idempotencyKey, eventType, payload, handler) {
        values($1, $2, $3::jsonb, 'failed', $4)
        on conflict (idempotency_key)
        do update set status = 'failed', error = excluded.error`,
-      [idempotencyKey, eventType, JSON.stringify(payload), String(err.message || err)]
+      [idempotencyKey, eventType, JSON.stringify(receiptPayload), String(err.message || err)]
     );
     throw err;
   }
@@ -371,6 +443,42 @@ async function handleEvent(type, payload) {
            checksum=excluded.checksum`,
         [payload.artifactId, payload.runId, payload.specRunId ?? null, payload.testResultId ?? null, payload.type, payload.storageKey, payload.contentType ?? null, payload.byteSize ?? null, payload.checksum ?? null]
       );
+
+      if (payload.contentBase64) {
+        const contentBuffer = decodeBase64Content(payload.contentBase64);
+        if (!contentBuffer || !contentBuffer.length) {
+          throw new ValidationError('artifact_content_invalid_base64', { artifactId: payload.artifactId });
+        }
+
+        await upsertArtifactBlob({
+          artifactId: payload.artifactId,
+          contentBuffer,
+          contentType: payload.contentType ?? null,
+          byteSize: payload.byteSize ?? contentBuffer.length,
+          checksum: payload.checksum ?? null
+        });
+      }
+
+      return;
+    }
+    case INGEST_EVENT_TYPES.REPLAY_CHUNK: {
+      if (!requireKeys(payload, ['runId', 'events'])) throw new Error('replay.chunk missing required fields');
+      const events = Array.isArray(payload.events) ? payload.events : [];
+      for (const event of events) {
+        if (!event || typeof event !== 'object') continue;
+        await query(
+          `insert into replay_events(run_id, spec_run_id, test_result_id, event_type, event_ts, payload)
+           values($1,$2,$3,$4,coalesce($5::timestamptz, now()),$6::jsonb)`,
+          [
+            payload.runId,
+            payload.specRunId ?? event.specRunId ?? null,
+            payload.testResultId ?? event.testResultId ?? null,
+            event.type || 'replay.event',
+            event.ts || event.at || null,
+            JSON.stringify(event)
+          ]
+        );
+      }
       return;
     }
     case INGEST_EVENT_TYPES.HEARTBEAT: {

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import path from 'node:path';
 import Fastify from 'fastify';
 import pg from 'pg';
 
@@ -37,6 +38,20 @@ const WORKSPACE_ROLES = Object.keys(ROLE_RANK);
 
 function hashText(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+function decodeBase64Content(value) {
+  if (!value || typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const direct = trimmed.startsWith('data:')
+    ? trimmed.slice(trimmed.indexOf(',') + 1)
+    : trimmed;
+  try {
+    return Buffer.from(direct, 'base64');
+  } catch {
+    return null;
+  }
 }
 
 function signText(value, secret = LOCAL_AUTH_SECRET) {
@@ -547,6 +562,55 @@ async function markArtifactGrantUsed(grantId) {
      where id = $1`,
     [grantId]
   );
+}
+
+async function fetchArtifactWithWorkspace(artifactId) {
+  const artifactRes = await query(
+    `select a.id, a.run_id, a.spec_run_id, a.test_result_id, a.type, a.storage_key, a.content_type, a.byte_size, a.checksum, a.created_at, r.workspace_id
+     from artifacts a
+     join runs r on r.id = a.run_id
+     where a.id = $1`,
+    [artifactId]
+  );
+  return artifactRes.rows[0] || null;
+}
+
+async function fetchArtifactBlob(artifactId) {
+  const blobRes = await query(
+    `select artifact_id, content, content_type, byte_size, checksum, created_at, updated_at
+     from artifact_blobs
+     where artifact_id = $1`,
+    [artifactId]
+  );
+  return blobRes.rows[0] || null;
+}
+
+function inferArtifactFileName(artifact) {
+  const storageKey = String(artifact?.storage_key || '').trim();
+  const fromStorage = storageKey ? path.basename(storageKey) : '';
+  if (fromStorage) return fromStorage;
+
+  const contentType = String(artifact?.content_type || '').toLowerCase();
+  let ext = 'bin';
+  if (contentType.includes('png')) ext = 'png';
+  else if (contentType.includes('jpeg') || contentType.includes('jpg')) ext = 'jpg';
+  else if (contentType.includes('webp')) ext = 'webp';
+  else if (contentType.includes('gif')) ext = 'gif';
+  else if (contentType.includes('mp4')) ext = 'mp4';
+
+  return `${String(artifact?.type || 'artifact').replace(/[^a-zA-Z0-9._-]/g, '-')}.${ext}`;
+}
+
+function sendArtifactBinary(reply, artifact, blob) {
+  const contentType = blob?.content_type || artifact?.content_type || 'application/octet-stream';
+  const byteSize = Number(blob?.byte_size || artifact?.byte_size || 0);
+  const fileName = inferArtifactFileName(artifact);
+
+  reply.header('content-type', contentType);
+  if (Number.isFinite(byteSize) && byteSize > 0) reply.header('content-length', String(byteSize));
+  reply.header('content-disposition', `inline; filename="${fileName.replace(/"/g, '')}"`);
+  reply.header('cache-control', 'private, max-age=60');
+  return reply.send(blob.content);
 }
 
 function createProjectIngestTokenRaw() {
@@ -1780,12 +1844,20 @@ app.get('/v1/runs/:id', { preHandler: workspaceGuard({ role: 'viewer', resolveWo
     [id]
   );
 
+  const replaySummary = await query(
+    `select count(*)::int as event_count, min(event_ts) as first_event_at, max(event_ts) as last_event_at
+     from replay_events
+     where run_id = $1`,
+    [id]
+  );
+
   return {
     item: runBundle.item,
     summary: runBundle.summary,
     specs: specs.rows,
     tests: tests.rows,
-    artifacts: artifacts.rows
+    artifacts: artifacts.rows,
+    replay: replaySummary.rows[0] || { event_count: 0 }
   };
 });
 
@@ -2035,21 +2107,26 @@ app.post('/v1/artifacts/sign-upload', async (request, reply) => {
     checksum = null
   } = request.body || {};
 
-  if (!workspaceId || !runId || !type) {
-    return reply.code(400).send({ error: 'workspaceId, runId, and type are required' });
+  if (!runId || !type) {
+    return reply.code(400).send({ error: 'runId and type are required' });
   }
 
-  const guard = workspaceGuard({ role: 'member', resolveWorkspaceId: async () => workspaceId });
-  const guardResponse = await guard(request, reply);
-  if (guardResponse) return guardResponse;
-
   const run = await fetchRun(runId);
-  if (!run || run.workspace_id !== workspaceId) {
+  if (!run) {
+    return reply.code(400).send({ error: 'run_not_found' });
+  }
+
+  const resolvedWorkspaceId = workspaceId || run.workspace_id;
+  if (workspaceId && run.workspace_id !== workspaceId) {
     return reply.code(400).send({ error: 'run_not_in_workspace' });
   }
 
+  const guard = workspaceGuard({ role: 'member', resolveWorkspaceId: async () => resolvedWorkspaceId });
+  const guardResponse = await guard(request, reply);
+  if (guardResponse) return guardResponse;
+
   const artifactId = crypto.randomUUID();
-  const storageKey = buildArtifactStorageKey({ workspaceId, runId, artifactId, fileName: fileName || `${type}.bin` });
+  const storageKey = buildArtifactStorageKey({ workspaceId: resolvedWorkspaceId, runId, artifactId, fileName: fileName || `${type}.bin` });
   const insert = await query(
     `insert into artifacts(id, run_id, spec_run_id, test_result_id, type, storage_key, content_type, byte_size, checksum)
      values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -2060,7 +2137,7 @@ app.post('/v1/artifacts/sign-upload', async (request, reply) => {
   const expiresAt = new Date(Date.now() + (ARTIFACT_SIGN_TTL_SEC * 1000)).toISOString();
   const token = await createArtifactGrant({
     artifactId,
-    workspaceId,
+    workspaceId: resolvedWorkspaceId,
     action: 'upload',
     expiresAt,
     meta: { byteSize, checksum, contentType, backend: STORAGE_BACKEND }
@@ -2085,14 +2162,7 @@ app.post('/v1/artifacts/sign-upload', async (request, reply) => {
 
 app.get('/v1/artifacts/:id/sign-download', { preHandler: workspaceGuard({ role: 'viewer', resolveWorkspaceId: 'artifactParam' }) }, async (request, reply) => {
   const { id } = request.params;
-  const artifactRes = await query(
-    `select a.*, r.workspace_id
-     from artifacts a
-     join runs r on r.id = a.run_id
-     where a.id = $1`,
-    [id]
-  );
-  const artifact = artifactRes.rows[0];
+  const artifact = await fetchArtifactWithWorkspace(id);
   if (!artifact) return reply.code(404).send({ error: 'not_found' });
 
   const expiresAt = new Date(Date.now() + (ARTIFACT_SIGN_TTL_SEC * 1000)).toISOString();
@@ -2121,19 +2191,85 @@ app.put('/v1/artifacts/upload/:id', async (request, reply) => {
   const token = request.query?.token || request.headers['x-testharbor-artifact-token'];
   const grant = await validateArtifactGrant({ artifactId: id, action: 'upload', token });
   if (!grant) return reply.code(403).send({ error: 'invalid_artifact_grant' });
-  await markArtifactGrantUsed(grant.id);
 
-  if (ARTIFACT_PROXY_MODE === 'json') {
-    return reply.code(200).send({
-      ok: true,
-      artifactId: id,
-      backend: STORAGE_BACKEND,
-      proxyMode: ARTIFACT_PROXY_MODE,
-      message: 'Upload token validated. Configure object storage write-through for binary persistence.'
+  const artifact = await fetchArtifactWithWorkspace(id);
+  if (!artifact) return reply.code(404).send({ error: 'not_found' });
+
+  let contentBuffer = null;
+  let contentType = request.headers['content-type'] || artifact.content_type || 'application/octet-stream';
+  let checksum = null;
+  let byteSize = null;
+
+  if (Buffer.isBuffer(request.body)) {
+    contentBuffer = request.body;
+    byteSize = request.body.length;
+  } else if (typeof request.body === 'string') {
+    contentBuffer = decodeBase64Content(request.body) || Buffer.from(request.body);
+    byteSize = contentBuffer.length;
+  } else if (request.body && typeof request.body === 'object') {
+    const payload = request.body;
+    if (typeof payload.contentBase64 === 'string') {
+      contentBuffer = decodeBase64Content(payload.contentBase64);
+      byteSize = Number(payload.byteSize || (contentBuffer ? contentBuffer.length : 0));
+    }
+    if (payload.contentType) contentType = payload.contentType;
+    if (payload.checksum) checksum = payload.checksum;
+  }
+
+  if (!Buffer.isBuffer(contentBuffer) || !contentBuffer.length) {
+    return reply.code(400).send({
+      error: 'artifact_upload_body_required',
+      message: 'Provide binary body or JSON { contentBase64 } payload.'
     });
   }
 
-  return reply.code(501).send({ error: 'artifact_upload_proxy_not_implemented' });
+  await query(
+    `insert into artifact_blobs(artifact_id, content, content_type, byte_size, checksum, created_at, updated_at)
+     values($1, $2, $3, $4, $5, now(), now())
+     on conflict (artifact_id) do update set
+       content = excluded.content,
+       content_type = excluded.content_type,
+       byte_size = excluded.byte_size,
+       checksum = coalesce(excluded.checksum, artifact_blobs.checksum),
+       updated_at = now()`,
+    [id, contentBuffer, contentType, byteSize || contentBuffer.length, checksum]
+  );
+
+  await query(
+    `update artifacts
+     set content_type = coalesce($2, content_type),
+         byte_size = coalesce($3, byte_size),
+         checksum = coalesce($4, checksum)
+     where id = $1`,
+    [id, contentType, byteSize || contentBuffer.length, checksum]
+  );
+
+  await markArtifactGrantUsed(grant.id);
+
+  return reply.code(200).send({
+    ok: true,
+    artifactId: id,
+    backend: STORAGE_BACKEND,
+    proxyMode: ARTIFACT_PROXY_MODE,
+    byteSize: byteSize || contentBuffer.length,
+    contentType
+  });
+});
+
+app.get('/v1/artifacts/:id/content', { preHandler: workspaceGuard({ role: 'viewer', resolveWorkspaceId: 'artifactParam' }) }, async (request, reply) => {
+  const { id } = request.params;
+  const artifact = await fetchArtifactWithWorkspace(id);
+  if (!artifact) return reply.code(404).send({ error: 'not_found' });
+
+  const blob = await fetchArtifactBlob(id);
+  if (!blob || !blob.content) {
+    return reply.code(404).send({
+      error: 'artifact_content_not_found',
+      message: 'No binary content available for this artifact yet.'
+    });
+  }
+
+  return sendArtifactBinary(reply, artifact, blob);
 });
 
 app.get('/v1/artifacts/download/:id', async (request, reply) => {
@@ -2142,22 +2278,53 @@ app.get('/v1/artifacts/download/:id', async (request, reply) => {
   const grant = await validateArtifactGrant({ artifactId: id, action: 'download', token });
   if (!grant) return reply.code(403).send({ error: 'invalid_artifact_grant' });
 
-  const artifactRes = await query(
-    `select id, run_id, spec_run_id, test_result_id, type, storage_key, content_type, byte_size, checksum, created_at
-     from artifacts
-     where id = $1`,
-    [id]
-  );
-  if (!artifactRes.rows.length) return reply.code(404).send({ error: 'not_found' });
+  const artifact = await fetchArtifactWithWorkspace(id);
+  if (!artifact) return reply.code(404).send({ error: 'not_found' });
 
   await markArtifactGrantUsed(grant.id);
 
+  const blob = await fetchArtifactBlob(id);
+  if (!blob || !blob.content) {
+    return reply.code(404).send({
+      error: 'artifact_content_not_found',
+      message: 'No binary content available for this artifact yet.'
+    });
+  }
+
+  return sendArtifactBinary(reply, artifact, blob);
+});
+
+app.get('/v1/runs/:id/replay', { preHandler: workspaceGuard({ role: 'viewer', resolveWorkspaceId: 'runParam' }) }, async (request, reply) => {
+  const { id } = request.params;
+  const { limit = 2000 } = request.query || {};
+  const normalizedLimit = Math.max(1, Math.min(Number(limit) || 2000, 10000));
+
+  const run = await fetchRun(id);
+  if (!run) return reply.code(404).send({ error: 'not_found' });
+
+  const { rows } = await query(
+    `select id, run_id, spec_run_id, test_result_id, event_type, event_ts, payload, created_at
+     from replay_events
+     where run_id = $1
+     order by id asc
+     limit $2`,
+    [id, normalizedLimit]
+  );
+
   return {
-    ok: true,
-    backend: STORAGE_BACKEND,
-    bucket: STORAGE_BUCKET,
-    proxyMode: ARTIFACT_PROXY_MODE,
-    item: artifactRes.rows[0]
+    run: {
+      id: run.id,
+      workspaceId: run.workspace_id,
+      projectId: run.project_id,
+      status: run.status,
+      branch: run.branch,
+      commitSha: run.commit_sha
+    },
+    events: rows,
+    pageInfo: {
+      limit: normalizedLimit,
+      returned: rows.length
+    }
   };
 });
 

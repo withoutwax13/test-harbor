@@ -5,6 +5,7 @@ export const INGEST_EVENT_TYPES = {
   SPEC_FINISHED: 'spec.finished',
   TEST_RESULT: 'test.result',
   ARTIFACT_REGISTERED: 'artifact.registered',
+  REPLAY_CHUNK: 'replay.chunk',
   HEARTBEAT: 'heartbeat'
 };
 
