@@ -1762,10 +1762,10 @@ app.get('/v1/runs/:id', { preHandler: workspaceGuard({ role: 'viewer', resolveWo
   const tests = specIds.length
     ? await query(
       `select tr.id, tr.spec_run_id, tr.test_case_id, tr.attempt_no, tr.status, tr.duration_ms,
-              tr.error_hash, tr.error_message, tr.retried_from_result_id, tr.created_at,
-              tc.title as test_title, tc.file_path
+              tr.error_hash, tr.error_message, tr.stacktrace, tr.retried_from_result_id, tr.created_at,
+              tc.title as test_title, tc.file_path, tc.suite_path
        from test_results tr
-       join test_cases tc on tc.id = tr.test_case_id
+       left join test_cases tc on tc.id = tr.test_case_id
        where tr.spec_run_id = any($1::uuid[])
        order by tr.created_at asc`,
       [specIds]
@@ -1877,7 +1877,7 @@ app.get('/v1/tests/:testCaseId/history', { preHandler: workspaceGuard({ role: 'v
 
   const { rows } = await query(
     `select tr.id, tr.spec_run_id, tr.test_case_id, tr.attempt_no, tr.status, tr.duration_ms,
-            tr.error_hash, tr.error_message, tr.retried_from_result_id, tr.created_at,
+            tr.error_hash, tr.error_message, tr.stacktrace, tr.retried_from_result_id, tr.created_at,
             sr.spec_path, r.id as run_id, r.branch, r.status as run_status
      from test_results tr
      join spec_runs sr on sr.id = tr.spec_run_id

@@ -37,7 +37,7 @@ class ValidationError extends Error {
 }
 
 const REQUIRED_FIELDS_BY_TYPE = {
-  [INGEST_EVENT_TYPES.RUN_STARTED]: ['runId', 'workspaceId', 'projectId'],
+  [INGEST_EVENT_TYPES.RUN_STARTED]: ['runId', 'projectId'],
   [INGEST_EVENT_TYPES.RUN_FINISHED]: ['runId', 'status'],
   [INGEST_EVENT_TYPES.SPEC_STARTED]: ['specRunId', 'runId', 'specPath'],
   [INGEST_EVENT_TYPES.SPEC_FINISHED]: ['specRunId', 'status'],
@@ -99,15 +99,22 @@ async function markProjectIngestTokenUsed(tokenId) {
   );
 }
 
-async function assertProjectWorkspaceMatch({ workspaceId, projectId }) {
+async function resolveWorkspaceContextFromProject({ projectId, workspaceId = null }) {
   const res = await query('select workspace_id from projects where id = $1', [projectId]);
   const projectWorkspaceId = res.rows[0]?.workspace_id || null;
   if (!projectWorkspaceId) {
     throw new ValidationError('project_not_found', { projectId });
   }
-  if (String(projectWorkspaceId) !== String(workspaceId)) {
+
+  if (workspaceId && String(projectWorkspaceId) !== String(workspaceId)) {
     throw new ValidationError('workspace_project_mismatch', { workspaceId, projectId, projectWorkspaceId });
   }
+
+  return {
+    projectId,
+    workspaceId: workspaceId || projectWorkspaceId,
+    projectWorkspaceId
+  };
 }
 
 async function authorizeIngestRequest(request, reply, { type, payload }) {
@@ -128,10 +135,16 @@ async function authorizeIngestRequest(request, reply, { type, payload }) {
   }
 
   if (type === INGEST_EVENT_TYPES.RUN_STARTED) {
-    if (String(payload.workspaceId) != String(token.workspace_id) || String(payload.projectId) != String(token.project_id)) {
+    if (String(payload.projectId) !== String(token.project_id)) {
       reply.code(403).send({ error: 'token_scope_mismatch' });
       return null;
     }
+
+    if (payload.workspaceId && String(payload.workspaceId) !== String(token.workspace_id)) {
+      reply.code(403).send({ error: 'token_scope_mismatch' });
+      return null;
+    }
+
     return { mode: 'project', token };
   }
 
@@ -249,8 +262,8 @@ async function lookupRunContextBySpecRunId(specRunId) {
 async function handleEvent(type, payload) {
   switch (type) {
     case INGEST_EVENT_TYPES.RUN_STARTED: {
-      if (!requireKeys(payload, ['runId', 'workspaceId', 'projectId'])) throw new Error('run.started missing required fields');
-      await assertProjectWorkspaceMatch({ workspaceId: payload.workspaceId, projectId: payload.projectId });
+      if (!requireKeys(payload, ['runId', 'projectId'])) throw new Error('run.started missing required fields');
+      const context = await resolveWorkspaceContextFromProject({ projectId: payload.projectId, workspaceId: payload.workspaceId ?? null });
       await query(
         `insert into runs(id, workspace_id, project_id, ci_provider, ci_build_id, commit_sha, branch, status, started_at)
          values($1,$2,$3,$4,$5,$6,$7,'running',coalesce($8::timestamptz, now()))
@@ -258,8 +271,10 @@ async function handleEvent(type, payload) {
             ci_provider=coalesce(excluded.ci_provider, runs.ci_provider),
             ci_build_id=coalesce(excluded.ci_build_id, runs.ci_build_id),
             commit_sha=coalesce(excluded.commit_sha, runs.commit_sha),
-            branch=coalesce(excluded.branch, runs.branch)`,
-        [payload.runId, payload.workspaceId, payload.projectId, payload.ciProvider ?? null, payload.ciBuildId ?? null, payload.commitSha ?? null, payload.branch ?? null, payload.startedAt ?? null]
+            branch=coalesce(excluded.branch, runs.branch),
+            workspace_id=excluded.workspace_id,
+            project_id=excluded.project_id`,
+        [payload.runId, context.workspaceId, payload.projectId, payload.ciProvider ?? null, payload.ciBuildId ?? null, payload.commitSha ?? null, payload.branch ?? null, payload.startedAt ?? null]
       );
       return;
     }

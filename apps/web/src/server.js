@@ -466,7 +466,7 @@ function renderTokenPanel(shell, tokens, { returnTo = '/app/connect', newTokenBu
   </section>`;
 }
 
-function renderSnippet(shell, { tokens = [], latestRun = null, newTokenBundle = null, returnTo = '/app/connect' } = {}) {
+function renderSnippet(shell, { tokens = [], latestRun = null, newTokenBundle = null } = {}) {
   const workspace = shell.selectedWorkspace;
   const project = shell.selectedProject;
   if (!workspace || !project) {
@@ -474,44 +474,37 @@ function renderSnippet(shell, { tokens = [], latestRun = null, newTokenBundle = 
   }
 
   const activeToken = newTokenBundle?.token || (tokens.find((item) => formatTokenState(item) === 'active') ? '${TESTHARBOR_INGEST_TOKEN}' : '<create-a-project-token>');
-  const runId = '${RUN_ID:-$(uuidgen)}';
-  const snippet = `export INGEST_BASE_URL="${INGEST_PUBLIC_BASE_URL}"
+  const snippet = `# Only one ID is required in cypress.config: projectId
+# Token and ingest URL come from env (CI secret + URL)
+export TESTHARBOR_INGEST_URL="${INGEST_PUBLIC_BASE_URL}/v1/ingest/events"
 export TESTHARBOR_INGEST_TOKEN="${activeToken}"
-export TESTHARBOR_WORKSPACE_ID="${workspace.id}"
-export TESTHARBOR_PROJECT_ID="${project.id}"
 
-node <<'EOF'
-import { TestHarborReporterClient } from '@testharbor/cypress-reporter';
-import { INGEST_EVENT_TYPES } from '@testharbor/shared';
+import { defineConfig } from 'cypress';
+import { withTestHarborCypress } from '@testharbor/cypress-reporter';
 
-const client = new TestHarborReporterClient({
-  ingestUrl: process.env.INGEST_BASE_URL + '/v1/ingest/events',
-  token: process.env.TESTHARBOR_INGEST_TOKEN
-});
-
-await client.send(INGEST_EVENT_TYPES.RUN_STARTED, {
-  runId: '${runId}',
-  workspaceId: process.env.TESTHARBOR_WORKSPACE_ID,
-  projectId: process.env.TESTHARBOR_PROJECT_ID,
-  branch: 'main',
-  commitSha: 'local-smoke',
-  ciProvider: 'cypress',
-  source: 'web-shell-snippet'
-});
-
-console.log('run.started sent');
-EOF`;
+export default defineConfig({
+  e2e: {
+    setupNodeEvents: withTestHarborCypress({
+      projectId: '${project.id}'
+    })
+  }
+});`;
 
   return `<section class="panel">
     <div class="panel-header">
       <div>
         <h2>Cypress-first connect snippet</h2>
-        <p>Use the selected project token with the reporter client, then verify the run appears in triage.</p>
+        <p>ProjectId-centric setup: paste one projectId in config, keep token/base URL in env.</p>
       </div>
       ${badge(project.provider || 'custom', 'neutral')}
     </div>
     <pre class="code-block">${escapeHtml(snippet)}</pre>
-    ${latestRun ? `<p>Latest run: <a class="text-link" href="/app/runs/${latestRun.id}">${escapeHtml(latestRun.id.slice(0, 8))}</a> · ${badge(latestRun.status, formatRunState(latestRun.status))}</p>` : '<p>No run yet. Send <code>run.started</code> from the snippet to verify end-to-end auth and ingest.</p>'}
+    <div class="stack">
+      <small><strong>Minimal setupNodeEvents:</strong> no manual run/spec/test wiring required.</small>
+      <small><strong>Workspace ID optional:</strong> ingest resolves workspace from projectId when omitted.</small>
+      <small><strong>Artifacts:</strong> helper auto-registers screenshots/videos from Cypress results.</small>
+    </div>
+    ${latestRun ? `<p>Latest run: <a class="text-link" href="/app/runs/${latestRun.id}">${escapeHtml(latestRun.id.slice(0, 8))}</a> · ${badge(latestRun.status, formatRunState(latestRun.status))}</p>` : '<p>No run yet. Run Cypress once to verify end-to-end auth and ingest.</p>'}
   </section>`;
 }
 
@@ -665,6 +658,20 @@ function renderRunsPage(shell, runsResp) {
   const items = runsResp.items || [];
   const pageInfo = runsResp.pageInfo || { page: 1, totalPages: 1, total: items.length };
   const failureFirst = items.filter((run) => (Number(run.fail_count || 0) + Number(run.flaky_count || 0)) > 0 || ['failed', 'flaky'].includes(run.status));
+  const failureOnly = shell.ctx.focus === 'failure';
+  const visibleItems = failureOnly ? failureFirst : items;
+
+  const paramsBase = new URLSearchParams({
+    workspaceId: shell.selectedWorkspace?.id || '',
+    projectId: shell.selectedProject?.id || '',
+    ...(shell.ctx.branch ? { branch: shell.ctx.branch } : {}),
+    ...(shell.ctx.runStatus ? { status: shell.ctx.runStatus } : {}),
+    ...(shell.ctx.from ? { from: shell.ctx.from } : {}),
+    ...(shell.ctx.to ? { to: shell.ctx.to } : {}),
+    ...(shell.ctx.page ? { page: shell.ctx.page } : {})
+  });
+  const allHref = `/app/runs?${new URLSearchParams([...paramsBase, ['focus', 'all']]).toString()}`;
+  const failureHref = `/app/runs?${new URLSearchParams([...paramsBase, ['focus', 'failure']]).toString()}`;
 
   return renderLayout({
     title: 'Runs',
@@ -676,7 +683,10 @@ function renderRunsPage(shell, runsResp) {
             <h2>Run list</h2>
             <p>Filterable browser list for the selected project, including date windows for triage slices.</p>
           </div>
-          ${badge(`${pageInfo.total} total`, 'neutral')}
+          <div class="topbar-badges">
+            ${badge(`${pageInfo.total} total`, 'neutral')}
+            ${badge(`${failureFirst.length} failing/flaky`, failureFirst.length ? 'warning' : 'neutral')}
+          </div>
         </div>
         <form class="filters filters-wide" method="get" action="/app/runs">
           <input type="hidden" name="workspaceId" value="${escapeHtml(shell.selectedWorkspace?.id || '')}" />
@@ -686,10 +696,22 @@ function renderRunsPage(shell, runsResp) {
           <label>From (UTC)<input type="datetime-local" name="from" value="${escapeHtml(shell.ctx.from || '')}" /></label>
           <label>To (UTC)<input type="datetime-local" name="to" value="${escapeHtml(shell.ctx.to || '')}" /></label>
           <label>Page<input type="number" min="1" name="page" value="${escapeHtml(shell.ctx.page || '1')}" /></label>
+          <label>Focus
+            <select name="focus">
+              <option value="all" ${failureOnly ? '' : 'selected'}>all runs</option>
+              <option value="failure" ${failureOnly ? 'selected' : ''}>failing/flaky only</option>
+            </select>
+          </label>
           <button class="button button-secondary" type="submit">Apply filters</button>
         </form>
         ${failureFirst.length ? `<div class="failure-quick-view">
-          <h3>Failure-first quick view</h3>
+          <div class="panel-header">
+            <h3>Failure-first quick view</h3>
+            <div class="topbar-badges">
+              <a class="button button-secondary" href="${escapeHtml(allHref)}">All runs</a>
+              <a class="button button-secondary" href="${escapeHtml(failureHref)}">Failures only</a>
+            </div>
+          </div>
           <div class="metrics-grid">
             ${failureFirst.slice(0, 6).map((run) => `<article class="metric">
               <span>${escapeHtml(formatDate(run.created_at))}</span>
@@ -698,10 +720,10 @@ function renderRunsPage(shell, runsResp) {
             </article>`).join('')}
           </div>
         </div>` : ''}
-        ${items.length ? `<div class="table-wrap"><table>
+        ${visibleItems.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Created</th><th>Status</th><th>Branch</th><th>Commit</th><th>Specs</th><th>Tests</th><th></th></tr></thead>
           <tbody>
-            ${items.map((run) => `<tr>
+            ${visibleItems.map((run) => `<tr>
               <td>${escapeHtml(formatDate(run.created_at))}</td>
               <td>${badge(run.status, formatRunState(run.status))}</td>
               <td>${escapeHtml(run.branch || 'n/a')}</td>
@@ -711,7 +733,7 @@ function renderRunsPage(shell, runsResp) {
               <td><a class="text-link" href="/app/runs/${run.id}">Open</a></td>
             </tr>`).join('')}
           </tbody>
-        </table></div>` : '<div class="empty-state"><h3>No runs yet</h3><p>Use the onboarding snippet or the connect page to start sending ingest events.</p></div>'}
+        </table></div>` : '<div class="empty-state"><h3>No runs for this filter</h3><p>Try clearing filters or switching focus back to all runs.</p></div>'}
       </section>`
   });
 }
@@ -744,6 +766,51 @@ function renderRunDetailPage(shell, runDetail) {
     .filter((row) => row.flakyCount > 0)
     .sort((a, b) => b.flakyCount - a.flakyCount)
     .slice(0, 10);
+
+  const mediaArtifacts = artifacts.filter((artifact) => {
+    const type = String(artifact.type || '').toLowerCase();
+    const contentType = String(artifact.content_type || '').toLowerCase();
+    return type.includes('screenshot')
+      || type.includes('video')
+      || contentType.startsWith('image/')
+      || contentType.startsWith('video/');
+  });
+  const screenshotCount = mediaArtifacts.filter((artifact) => {
+    const type = String(artifact.type || '').toLowerCase();
+    const contentType = String(artifact.content_type || '').toLowerCase();
+    return type.includes('screenshot') || contentType.startsWith('image/');
+  }).length;
+  const videoCount = mediaArtifacts.filter((artifact) => {
+    const type = String(artifact.type || '').toLowerCase();
+    const contentType = String(artifact.content_type || '').toLowerCase();
+    return type.includes('video') || contentType.startsWith('video/');
+  }).length;
+
+  const errorLogs = failingOrFlaky.filter((test) => test.error_message || test.stacktrace);
+
+  const timeline = [
+    ...specs.map((spec) => ({
+      ts: spec.finished_at || spec.started_at || spec.created_at,
+      kind: `spec.${spec.status || 'event'}`,
+      title: spec.spec_path,
+      detail: `attempts=${spec.attempts || 0}, duration=${formatDuration(spec.duration_ms)}`
+    })),
+    ...tests.map((test) => ({
+      ts: test.created_at,
+      kind: `test.${test.status || 'event'}`,
+      title: test.test_title || test.test_case_id || test.id,
+      detail: `${test.file_path || 'n/a'}${test.error_message ? ` • ${test.error_message.slice(0, 140)}` : ''}`
+    })),
+    ...artifacts.map((artifact) => ({
+      ts: artifact.created_at,
+      kind: 'artifact.registered',
+      title: artifact.type,
+      detail: `${artifact.content_type || 'application/octet-stream'} • ${formatBytes(artifact.byte_size)}`
+    }))
+  ]
+    .filter((entry) => entry.ts)
+    .sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
+    .slice(0, 120);
 
   return renderLayout({
     title: `Run ${item.id.slice(0, 8)}`,
@@ -788,22 +855,37 @@ function renderRunDetailPage(shell, runDetail) {
         </section>
       </div>
       <section class="panel">
-        <div class="panel-header"><div><h2>Failures & flakes</h2><p>Fast browser triage for failing tests. Jump directly into per-test history.</p></div></div>
+        <div class="panel-header"><div><h2>Failures & flakes</h2><p>Fast browser triage for failing tests. Includes captured error message and stacktrace preview.</p></div></div>
         ${failingOrFlaky.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Status</th><th>Test</th><th>Spec</th><th>Error</th><th></th></tr></thead>
           <tbody>
-            ${failingOrFlaky.slice(0, 60).map((test) => `<tr>
+            ${failingOrFlaky.slice(0, 80).map((test) => `<tr>
               <td>${badge(test.status, test.status === 'failed' ? 'danger' : 'warning')}</td>
               <td>${escapeHtml(test.test_title || 'test')}</td>
               <td>${escapeHtml(test.file_path || 'n/a')}</td>
-              <td>${escapeHtml((test.error_message || 'No error message').slice(0, 180))}</td>
+              <td>${escapeHtml((test.error_message || 'No error message').slice(0, 180))}${test.stacktrace ? '<br/><small>stacktrace captured</small>' : ''}</td>
               <td>${test.test_case_id ? `<a class="text-link" href="/app/tests/${test.test_case_id}/history?workspaceId=${encodeURIComponent(shell.selectedWorkspace?.id || '')}">History</a>` : ''}</td>
             </tr>`).join('')}
           </tbody>
         </table></div>` : '<div class="empty-state"><h3>No failing tests</h3><p>This run has no failed or flaky test results.</p></div>'}
       </section>
       <section class="panel">
-        <div class="panel-header"><div><h2>Artifacts</h2><p>Every artifact registered against this run. Open individual entries for signed access metadata.</p></div></div>
+        <div class="panel-header"><div><h2>Error logs</h2><p>Expanded error message + stacktrace for quick debugging without leaving the run page.</p></div></div>
+        ${errorLogs.length ? `<div class="stack">${errorLogs.slice(0, 30).map((test, idx) => `<details>
+          <summary>${escapeHtml(test.test_title || `test-${idx + 1}`)} · ${escapeHtml(test.file_path || 'n/a')}</summary>
+          <pre class="code-block">${escapeHtml(`${test.error_message || 'No error message'}
+
+${test.stacktrace || 'No stacktrace captured'}`)}</pre>
+        </details>`).join('')}</div>` : '<div class="empty-state"><h3>No error logs captured</h3><p>When test.result events include error_message/stacktrace, details appear here.</p></div>'}
+      </section>
+      <section class="panel">
+        <div class="panel-header"><div><h2>Artifacts</h2><p>Screenshots/videos are listed here once registered by the Cypress reporter helper.</p></div></div>
+        <div class="metrics-grid">
+          ${metric('Media artifacts', mediaArtifacts.length)}
+          ${metric('Screenshots', screenshotCount)}
+          ${metric('Videos', videoCount)}
+          ${metric('All artifacts', artifacts.length)}
+        </div>
         ${artifacts.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Type</th><th>Content type</th><th>Size</th><th>Created</th><th></th></tr></thead>
           <tbody>
@@ -816,6 +898,20 @@ function renderRunDetailPage(shell, runDetail) {
             </tr>`).join('')}
           </tbody>
         </table></div>` : '<div class="empty-state"><h3>No artifacts</h3><p>Artifacts appear here after the ingest client registers them.</p></div>'}
+      </section>
+      <section class="panel">
+        <div class="panel-header"><div><h2>Replay-like timeline</h2><p>Event timeline for run/spec/test/artifact activity (lightweight Cypress Cloud-style trace).</p></div></div>
+        ${timeline.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Time</th><th>Event</th><th>Title</th><th>Detail</th></tr></thead>
+          <tbody>
+            ${timeline.map((entry) => `<tr>
+              <td>${escapeHtml(formatDate(entry.ts))}</td>
+              <td><code>${escapeHtml(entry.kind)}</code></td>
+              <td>${escapeHtml(entry.title || 'n/a')}</td>
+              <td>${escapeHtml(entry.detail || '')}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>` : '<div class="empty-state"><h3>No timeline events</h3><p>Events appear after run/spec/test/artifact ingest activity.</p></div>'}
       </section>`
   });
 }
@@ -1459,6 +1555,7 @@ app.get('/app/runs', async (request, reply) => {
   shell.ctx.from = fromInput;
   shell.ctx.to = toInput;
   shell.ctx.page = String(request.query?.page || '1');
+  shell.ctx.focus = String(request.query?.focus || 'all');
   return reply.type('text/html').send(renderRunsPage(shell, runsResp));
 });
 
