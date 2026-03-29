@@ -57,3 +57,53 @@ Artifacts are written to `artifacts/parity/` (manifest + static verify log + opt
 - `npm run smoke:auth-explorer` for auth, artifacts, analytics, and explorer routes
 - `npm run smoke:web-shell` for the browser shell flow
 - `npm run smoke:webhooks:suite` for webhook delivery behavior
+
+## Quick activation (one command)
+
+Run this single command to bring up TestHarbor locally, run migrations, and seed baseline data:
+
+```bash
+npm run activate:local
+```
+
+This is the recommended "get to green" path when you just want local parity-ready services running.
+If you want a full smoke validation immediately after activation, run:
+
+```bash
+npm run smoke:all
+```
+
+## Cypress config UX (projectId-first)
+
+Use the reporter helper with **only** projectId in your Cypress config.
+Token and ingest URL stay in env and are pulled automatically.
+
+```js
+const { withTestHarborCypress } = require("@testharbor/cypress-reporter");
+
+module.exports = defineConfig({
+  e2e: {
+    setupNodeEvents: withTestHarborCypress({
+      projectId: process.env.TESTHARBOR_PROJECT_ID, // required: paste this in config
+    }),
+  },
+});
+```
+
+Recommended env for runtime:
+
+```bash
+export TESTHARBOR_INGEST_URL="http://localhost:4010/v1/ingest/events"
+export TESTHARBOR_INGEST_TOKEN="<project-ingest-token>"
+```
+
+If your project uses non-local branch/commit details, pass them directly:
+
+```js
+withTestHarborCypress({
+  projectId: 'your-testharbor-project-id',
+  branch: 'main',
+  commitSha: process.env.GIT_COMMIT,
+  runId: process.env.CI_RUN_ID,
+})
+```

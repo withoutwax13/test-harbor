@@ -200,3 +200,24 @@ Troubleshooting matrix:
 | `401 unauthorized` in auth lanes | Missing or mismatched `API_AUTH_TOKEN` / `INGEST_AUTH_TOKEN` | Export matching bearer tokens for API and ingest before running auth smokes |
 | `timeout waiting for webhook delivery terminal state` | Worker not running, stale runtime, or retry window too short | Check `docker compose logs --tail=200 api ingest worker`; increase `WEBHOOK_WAIT_TIMEOUT_MS` only after confirming current images |
 | Seeded webhook smoke rows remain after run | Running default-safe mode or org cleanup opt-in is off | Use `WEBHOOK_SEEDED_DATA_MODE=teardown`; add `ALLOW_SMOKE_ORG_CLEANUP=1` plus `WEBHOOK_DELETE_SMOKE_ORG_ON_EXIT=1` only for isolated smoke org cleanup |
+
+## One-command activation
+
+For local developer start-up, use the new one-liner:
+
+```bash
+npm run activate:local
+```
+
+This runs in order:
+1. `docker compose up -d postgres redis minio ingest api worker web`
+2. `npm run db:migrate:container`
+3. `npm run seed:local`
+
+After this, use the app at <http://localhost:3000> and run your cypress smoke with the project token flow.
+
+To run smoke immediately after activation:
+
+```bash
+npm run activate:local && npm run smoke:all
+```

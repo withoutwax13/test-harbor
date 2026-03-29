@@ -17,7 +17,7 @@
     "seed:local": "node scripts/seed-local.mjs",
     "smoke:all": "node scripts/smoke-all.mjs",
     "test:ingest:contract": "node scripts/test-ingest-contract.mjs",
-    "smoke:bootstrap": "bash scripts/smoke-all.sh",
+    "smoke:bootstrap": "bash scripts/activate-local.sh && npm run smoke:all",
     "smoke:webhooks": "node scripts/smoke-webhooks.mjs",
     "smoke:webhooks:dead": "node scripts/smoke-webhooks-dead.mjs",
     "smoke:webhooks:auth:negative": "node scripts/smoke-webhooks-negative-auth.mjs",
@@ -35,6 +35,8 @@
     "verify:batch19-26:static": "node scripts/verify-batch19-26.mjs static",
     "verify:batch19-26:onboarding": "node scripts/verify-batch19-26.mjs onboarding",
     "verify:batch19-26:cypress": "node scripts/verify-batch19-26.mjs cypress",
-    "parity:pack": "node scripts/parity-pack.mjs"
+    "parity:pack": "node scripts/parity-pack.mjs",
+    "activate:local": "bash scripts/activate-local.sh",
+    "stack:up": "bash scripts/activate-local.sh"
   }
 }
