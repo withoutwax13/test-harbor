@@ -85,6 +85,37 @@ You can also use the dedicated command:
 npm run activate:local:clean
 ```
 
+## Replay hooks (support file)
+
+To capture richer DOM/network/console events in replay, add a small support-side hook file and call `cy.task('testharbor:replay', ...)`.
+
+`cypress/support/e2e.{js,ts}`
+
+```js
+Cypress.on('command:end', (command) => {
+  if (!command?.name) return;
+  cy.task('testharbor:replay', {
+    type: 'replay.command',
+    title: command.name,
+    payload: {
+      state: command.state,
+      message: command.message,
+    },
+  });
+});
+
+Cypress.on('fail', (error) => {
+  cy.task('testharbor:replay', {
+    type: 'replay.fail',
+    title: 'Test failed',
+    detail: String(error?.message || error)
+  });
+  throw error;
+});
+```
+
+If you do not enable this support-side instrumentation, replay events will be limited.
+
 ## Cypress config UX (projectId-first)
 
 Use the reporter helper with **only** projectId in your Cypress config.
