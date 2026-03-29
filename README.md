@@ -76,13 +76,20 @@ npm run smoke:all
 To force a clean docker cache rebuild on startup/restart (useful if the UI appears stale after code changes), use:
 
 ```bash
-TH_CLEAR_DOCKER_CACHE=1 npm run activate:local
+npm run activate:local:clean
 ```
 
-You can also use the dedicated command:
+Shell-specific alternatives:
 
 ```bash
-npm run activate:local:clean
+# bash/zsh
+TH_CLEAR_DOCKER_CACHE=1 npm run activate:local
+
+# PowerShell
+$env:TH_CLEAR_DOCKER_CACHE='1'; npm run activate:local
+
+# cmd.exe
+set TH_CLEAR_DOCKER_CACHE=1&& npm run activate:local
 ```
 
 ## Replay hooks (support file)

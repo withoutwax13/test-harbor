@@ -219,9 +219,20 @@ After this, use the app at <http://localhost:3000> and run your cypress smoke wi
 To force a cache-clean restart when local UI updates look stale:
 
 ```bash
-TH_CLEAR_DOCKER_CACHE=1 npm run activate:local
-# same as:
 npm run activate:local:clean
+```
+
+Shell-specific alternatives:
+
+```bash
+# bash/zsh
+TH_CLEAR_DOCKER_CACHE=1 npm run activate:local
+
+# PowerShell
+$env:TH_CLEAR_DOCKER_CACHE='1'; npm run activate:local
+
+# cmd.exe
+set TH_CLEAR_DOCKER_CACHE=1&& npm run activate:local
 ```
 
 To run smoke immediately after activation:

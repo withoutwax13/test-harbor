@@ -4,6 +4,17 @@ set -euo pipefail
 STACK_SERVICES="postgres redis minio ingest api worker web"
 REBUILD_MODE="${TH_CLEAR_DOCKER_CACHE:-0}"
 
+for arg in "$@"; do
+  case "$arg" in
+    --clean|--clear-cache|--rebuild)
+      REBUILD_MODE="1"
+      ;;
+    --no-clean)
+      REBUILD_MODE="0"
+      ;;
+  esac
+done
+
 if [[ "${REBUILD_MODE}" == "1" ]]; then
   echo "[1/4] Clearing/rebuilding local stack images for ${STACK_SERVICES}..."
   docker compose build --no-cache --pull ${STACK_SERVICES}
