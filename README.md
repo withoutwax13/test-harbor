@@ -22,6 +22,17 @@ TestHarbor is a local-first test telemetry stack with API, ingest, worker, and b
   - global `INGEST_AUTH_TOKEN`
   - active project token scoped to the run/project context.
 
+Token issue (admin/member with workspace access):
+
+```bash
+curl -X POST "http://localhost:4000/v1/projects/<projectId>/ingest-tokens" \
+  -H "Authorization: Bearer <api-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"cypress-ci","ttlDays":90}'
+```
+
+Use returned token as `TESTHARBOR_INGEST_TOKEN` in Cypress reporter configuration.
+
 ## Parity evidence pack
 
 Generate parity artifacts and static verifier output:
@@ -33,8 +44,8 @@ npm run parity:pack
 Optional HTML capture for key shell pages:
 
 ```bash
-PARITY_CAPTURE_BASE_URL=http://localhost:3000 \
-PARITY_CAPTURE_COOKIE='th_session=...' \
+TH_PARITY_WEB_BASE_URL=http://localhost:3000 \
+TH_AUTH_TOKEN='<session-token-from-/v1/auth/login>' \
 npm run parity:pack
 ```
 

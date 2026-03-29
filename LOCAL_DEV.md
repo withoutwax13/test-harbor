@@ -59,11 +59,22 @@ Parity evidence pack:
 npm run parity:pack
 ```
 
-Optional shell capture when web is reachable and you have a session cookie:
+Project token quick issue:
 
 ```bash
-PARITY_CAPTURE_BASE_URL=http://localhost:3000 \
-PARITY_CAPTURE_COOKIE='th_session=...' \
+curl -X POST "http://localhost:4000/v1/projects/<projectId>/ingest-tokens" \
+  -H "Authorization: Bearer <api-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"local-cypress","ttlDays":30}'
+```
+
+Use returned token as `TESTHARBOR_INGEST_TOKEN` for ingest/Cypress reporter calls.
+
+Optional shell capture when web is reachable and you have a session token:
+
+```bash
+TH_PARITY_WEB_BASE_URL=http://localhost:3000 \
+TH_AUTH_TOKEN='<session-token-from-/v1/auth/login>' \
 npm run parity:pack
 ```
 

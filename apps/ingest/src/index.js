@@ -20,7 +20,6 @@ function parseBearerToken(headerValue) {
 }
 
 app.addHook('onRequest', async (request, reply) => {
-  if (!INGEST_AUTH_TOKEN) return;
   if (request.url.startsWith('/healthz')) return;
 
   const token = parseBearerToken(request.headers.authorization);
@@ -112,17 +111,13 @@ async function assertProjectWorkspaceMatch({ workspaceId, projectId }) {
 }
 
 async function authorizeIngestRequest(request, reply, { type, payload }) {
-  if (!INGEST_AUTH_TOKEN) {
-    return { mode: 'open', token: null };
-  }
-
   const bearer = parseBearerToken(request.headers.authorization);
   if (!bearer) {
     reply.code(401).send({ error: 'unauthorized' });
     return null;
   }
 
-  if (bearer === INGEST_AUTH_TOKEN) {
+  if (INGEST_AUTH_TOKEN && bearer === INGEST_AUTH_TOKEN) {
     return { mode: 'static', token: null };
   }
 
