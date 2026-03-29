@@ -290,6 +290,10 @@ export function setupTestHarbor(on, config, options = {}) {
   );
   const replayQueue = [];
   const registeredArtifactDedupeKeys = new Set();
+  const replayFlushDebounceMs = Math.max(10, toNumber(process.env.TESTHARBOR_REPLAY_FLUSH_DEBOUNCE_MS, 200));
+  let replayFlushTimer = null;
+  let replayFlushInFlight = null;
+  let replayFlushContext = {};
 
   function pushReplayEvent(event = {}) {
     if (!event || typeof event !== 'object') return null;
@@ -308,15 +312,59 @@ export function setupTestHarbor(on, config, options = {}) {
     return enriched;
   }
 
-  async function flushReplayChunk(context = {}) {
-    if (!replayQueue.length) return;
-    const events = replayQueue.splice(0, replayQueue.length);
-    await sendSafe(INGEST_EVENT_TYPES.REPLAY_CHUNK, {
-      runId,
+  function mergeReplayFlushContext(context = {}) {
+    if (!context || typeof context !== 'object') return;
+    replayFlushContext = {
+      ...replayFlushContext,
       ...(context.specRunId ? { specRunId: context.specRunId } : {}),
-      ...(context.testResultId ? { testResultId: context.testResultId } : {}),
-      events
-    });
+      ...(context.testResultId ? { testResultId: context.testResultId } : {})
+    };
+  }
+
+  function clearReplayFlushTimer() {
+    if (replayFlushTimer) {
+      clearTimeout(replayFlushTimer);
+      replayFlushTimer = null;
+    }
+  }
+
+  function scheduleReplayFlush(context = {}) {
+    mergeReplayFlushContext(context);
+    if (replayFlushTimer) return;
+    replayFlushTimer = setTimeout(() => {
+      replayFlushTimer = null;
+      void flushReplayChunk().catch(() => {});
+    }, replayFlushDebounceMs);
+  }
+
+  async function flushReplayChunk(context = {}) {
+    mergeReplayFlushContext(context);
+    clearReplayFlushTimer();
+
+    if (replayFlushInFlight) {
+      await replayFlushInFlight;
+    }
+
+    if (!replayQueue.length) return;
+
+    const flushContext = replayFlushContext;
+    replayFlushContext = {};
+    const events = replayQueue.splice(0, replayQueue.length);
+
+    replayFlushInFlight = (async () => {
+      await sendSafe(INGEST_EVENT_TYPES.REPLAY_CHUNK, {
+        runId,
+        ...(flushContext.specRunId ? { specRunId: flushContext.specRunId } : {}),
+        ...(flushContext.testResultId ? { testResultId: flushContext.testResultId } : {}),
+        events
+      });
+    })();
+
+    try {
+      await replayFlushInFlight;
+    } finally {
+      replayFlushInFlight = null;
+    }
   }
 
   async function registerArtifact(opts = {}) {
@@ -388,15 +436,34 @@ export function setupTestHarbor(on, config, options = {}) {
             ts: toIso(event?.ts || entry?.at || new Date())
           });
         }
-        void flushReplayChunk({
+        scheduleReplayFlush({
           ...(specRunId ? { specRunId } : {})
-        }).catch(() => {});
+        });
+        if (replayQueue.length >= 50) {
+          void flushReplayChunk({
+            ...(specRunId ? { specRunId } : {})
+          }).catch(() => {});
+        }
       }
       return entry || null;
     }
   });
 
   on('before:run', async () => {
+    pushReplayEvent({
+      type: 'replay.run.started',
+      title: 'Run started',
+      detail: `Run ${runId} started`,
+      payload: {
+        runId,
+        projectId,
+        workspaceId: workspaceId || null,
+        branch,
+        commitSha,
+        ciBuildId
+      }
+    });
+
     await sendSafe(INGEST_EVENT_TYPES.RUN_STARTED, {
       runId,
       projectId,
@@ -408,6 +475,8 @@ export function setupTestHarbor(on, config, options = {}) {
       startedAt: toIso(),
       source: 'cypress.setupNodeEvents'
     });
+
+    await flushReplayChunk();
   });
 
   on('before:spec', async (spec) => {
@@ -416,12 +485,21 @@ export function setupTestHarbor(on, config, options = {}) {
     specRunIds.set(specPath, specRunId);
     runMetrics.totalSpecs += 1;
 
+    pushReplayEvent({
+      type: 'replay.spec.started',
+      title: specPath,
+      detail: 'Spec started',
+      payload: { specPath, specRunId, runId }
+    });
+
     await sendSafe(INGEST_EVENT_TYPES.SPEC_STARTED, {
       specRunId,
       runId,
       specPath,
       startedAt: toIso()
     });
+
+    scheduleReplayFlush({ specRunId });
   });
 
   on('after:screenshot', async (details) => {
@@ -503,8 +581,9 @@ export function setupTestHarbor(on, config, options = {}) {
         0
       ) || toNumber(test?.wallClockDuration, 0) || null;
 
+      const testResultId = crypto.randomUUID();
       await sendSafe(INGEST_EVENT_TYPES.TEST_RESULT, {
-        testResultId: crypto.randomUUID(),
+        testResultId,
         specRunId,
         projectId,
         stableTestKey: stableTestKey(specPath, title),
@@ -517,6 +596,23 @@ export function setupTestHarbor(on, config, options = {}) {
         errorHash: hashErrorMessage(errorMessage),
         errorMessage,
         stacktrace
+      });
+
+      pushReplayEvent({
+        type: 'replay.test.result',
+        title,
+        detail: `${status.toUpperCase()} · ${durationMs ? `${durationMs}ms` : 'duration n/a'}`,
+        payload: {
+          runId,
+          specRunId,
+          testResultId,
+          specPath,
+          suitePath,
+          status,
+          durationMs,
+          attemptNo: attempts.length,
+          errorMessage: errorMessage || null
+        }
       });
     }
 
@@ -561,11 +657,29 @@ export function setupTestHarbor(on, config, options = {}) {
       }
     }
 
+    const specStatus = specStatusFromSummary(results, runMetrics.failCount);
+    pushReplayEvent({
+      type: 'replay.spec.finished',
+      title: specPath,
+      detail: `Spec ${specStatus}`,
+      payload: {
+        runId,
+        specRunId,
+        specPath,
+        status: specStatus,
+        testsInSpec: tests.length,
+        passCount: tests.filter((t) => normalizeResultState((Array.isArray(t?.attempts) && t.attempts.length ? t.attempts.at(-1)?.state : t?.state)) === 'passed').length,
+        failCount: tests.filter((t) => normalizeResultState((Array.isArray(t?.attempts) && t.attempts.length ? t.attempts.at(-1)?.state : t?.state)) === 'failed').length,
+        screenshotCount: screenshots.length,
+        hasVideo: Boolean(results?.video)
+      }
+    });
+
     await flushReplayChunk({ specRunId });
 
     await sendSafe(INGEST_EVENT_TYPES.SPEC_FINISHED, {
       specRunId,
-      status: specStatusFromSummary(results, runMetrics.failCount),
+      status: specStatus,
       durationMs: toNumber(results?.stats?.duration, null),
       attempts: toNumber(results?.stats?.attempts, 1),
       finishedAt: toIso()
@@ -574,15 +688,32 @@ export function setupTestHarbor(on, config, options = {}) {
 
   on('after:run', async (results) => {
     const totalSpecs = toNumber(results?.totalSuites, runMetrics.totalSpecs || specRunIds.size);
-    await flushReplayChunk();
     const totalTests = toNumber(results?.totalTests, runMetrics.totalTests);
     const passCount = toNumber(results?.totalPassed, runMetrics.passCount);
     const failCount = toNumber(results?.totalFailed, runMetrics.failCount);
     const flakyCount = toNumber(results?.totalFlaky, runMetrics.flakyCount);
+    const status = runStatusFromSummary(results, failCount);
+
+    pushReplayEvent({
+      type: 'replay.run.finished',
+      title: `Run ${status}`,
+      detail: `${totalTests} tests · ${passCount} passed · ${failCount} failed · ${flakyCount} flaky`,
+      payload: {
+        runId,
+        status,
+        totalSpecs,
+        totalTests,
+        passCount,
+        failCount,
+        flakyCount
+      }
+    });
+
+    await flushReplayChunk();
 
     await sendSafe(INGEST_EVENT_TYPES.RUN_FINISHED, {
       runId,
-      status: runStatusFromSummary(results, failCount),
+      status,
       totalSpecs,
       totalTests,
       passCount,
@@ -610,3 +741,5 @@ export function withTestHarborCypress(options = {}) {
     return setupTestHarbor(on, config, options);
   };
 }
+
+export { installTestHarborReplayHooks } from './support.js';

@@ -70,6 +70,18 @@ curl -X POST "http://localhost:4000/v1/projects/<projectId>/ingest-tokens" \
 
 Use returned token as `TESTHARBOR_INGEST_TOKEN` for ingest/Cypress reporter calls.
 
+## Replay/time-travel hook setup (required for rich data)
+
+In your Cypress support file, install the helper once:
+
+```js
+import { installTestHarborReplayHooks } from '@testharbor/cypress-reporter/support';
+
+installTestHarborReplayHooks();
+```
+
+Without this support hook, replay only shows baseline lifecycle events (limited detail).
+
 Optional shell capture when web is reachable and you have a session token:
 
 ```bash

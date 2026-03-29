@@ -388,6 +388,42 @@ th, td {
 .timeline-group h3 {
   margin: 0 0 8px;
 }
+
+.artifact-preview-grid {
+  align-items: start;
+}
+
+.artifact-preview-card {
+  overflow: hidden;
+  min-width: 0;
+}
+
+.artifact-preview-card small {
+  overflow-wrap: anywhere;
+}
+
+.artifact-preview-media {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: clamp(180px, 24vw, 280px);
+  object-fit: contain;
+  border-radius: 14px;
+  border: 1px solid rgba(25, 33, 38, 0.12);
+  background: #111820;
+}
+
+.artifact-detail-media {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-height: 180px;
+  max-height: min(70vh, 720px);
+  object-fit: contain;
+  border-radius: 16px;
+  border: 1px solid rgba(25, 33, 38, 0.12);
+  background: #111820;
+}
 .login-body {
   min-height: 100vh;
   display: grid;

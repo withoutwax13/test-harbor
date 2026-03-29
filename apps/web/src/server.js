@@ -922,8 +922,8 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
             return `<article class="panel artifact-preview-card">
               <div class="panel-header compact"><strong>${escapeHtml(artifact.type)}</strong><small>${escapeHtml(formatDate(artifact.created_at))}</small></div>
               ${isVideo
-                ? `<video controls preload="metadata" src="${escapeHtml(inlineUrl)}"></video>`
-                : `<img loading="lazy" src="${escapeHtml(inlineUrl)}" alt="${escapeHtml(artifact.type)}" />`}
+                ? `<video class="artifact-preview-media" controls preload="metadata" src="${escapeHtml(inlineUrl)}"></video>`
+                : `<img class="artifact-preview-media" loading="lazy" src="${escapeHtml(inlineUrl)}" alt="${escapeHtml(artifact.type)}" />`}
               <small>${escapeHtml(artifact.content_type || 'application/octet-stream')} · ${escapeHtml(formatBytes(artifact.byte_size))}</small>
               <a class="text-link" href="/app/artifacts/${artifact.id}">Details</a>
             </article>`;
@@ -1112,8 +1112,8 @@ function renderArtifactPage(shell, detail) {
             ? `<div class="panel">
               <div class="panel-header compact"><strong>Inline preview</strong></div>
               ${isVideo
-                ? `<video controls preload="metadata" src="${escapeHtml(inlineUrl)}"></video>`
-                : `<img loading="lazy" src="${escapeHtml(inlineUrl)}" alt="${escapeHtml(detail?.item?.type || 'artifact')}" />`}
+                ? `<video class="artifact-detail-media" controls preload="metadata" src="${escapeHtml(inlineUrl)}"></video>`
+                : `<img class="artifact-detail-media" loading="lazy" src="${escapeHtml(inlineUrl)}" alt="${escapeHtml(detail?.item?.type || 'artifact')}" />`}
               <div class="stack two-up" style="margin-top: 12px;">
                 <a class="button" href="${escapeHtml(inlineUrl)}" target="_blank" rel="noreferrer">Open media</a>
                 <a class="button button-secondary" href="${escapeHtml(inlineUrl)}" download>Download</a>

@@ -94,34 +94,30 @@ set TH_CLEAR_DOCKER_CACHE=1&& npm run activate:local
 
 ## Replay hooks (support file)
 
-To capture richer DOM/network/console events in replay, add a small support-side hook file and call `cy.task('testharbor:replay', ...)`.
+For reliable replay data (steps + console + network + DOM snapshots), use the packaged support helper.
 
 `cypress/support/e2e.{js,ts}`
 
 ```js
-Cypress.on('command:end', (command) => {
-  if (!command?.name) return;
-  cy.task('testharbor:replay', {
-    type: 'replay.command',
-    title: command.name,
-    payload: {
-      state: command.state,
-      message: command.message,
-    },
-  });
-});
+import { installTestHarborReplayHooks } from '@testharbor/cypress-reporter/support';
 
-Cypress.on('fail', (error) => {
-  cy.task('testharbor:replay', {
-    type: 'replay.fail',
-    title: 'Test failed',
-    detail: String(error?.message || error)
-  });
-  throw error;
+installTestHarborReplayHooks();
+```
+
+Optional tuning:
+
+```js
+installTestHarborReplayHooks({
+  maxEvents: 800,
+  maxDomChars: 150000,
+  maxDetailChars: 8000,
+  console: true,
+  network: true,
+  dom: true,
 });
 ```
 
-If you do not enable this support-side instrumentation, replay events will be limited.
+Without support-side hooks, replay is limited to baseline lifecycle events only.
 
 ## Cypress config UX (projectId-first)
 
