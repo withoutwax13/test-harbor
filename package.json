@@ -37,6 +37,7 @@
     "verify:batch19-26:cypress": "node scripts/verify-batch19-26.mjs cypress",
     "parity:pack": "node scripts/parity-pack.mjs",
     "activate:local": "bash scripts/activate-local.sh",
+    "activate:local:clean": "TH_CLEAR_DOCKER_CACHE=1 bash scripts/activate-local.sh",
     "stack:up": "bash scripts/activate-local.sh"
   }
 }

@@ -216,6 +216,14 @@ This runs in order:
 
 After this, use the app at <http://localhost:3000> and run your cypress smoke with the project token flow.
 
+To force a cache-clean restart when local UI updates look stale:
+
+```bash
+TH_CLEAR_DOCKER_CACHE=1 npm run activate:local
+# same as:
+npm run activate:local:clean
+```
+
 To run smoke immediately after activation:
 
 ```bash

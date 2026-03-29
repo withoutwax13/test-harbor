@@ -3,7 +3,18 @@ import Fastify from 'fastify';
 import pg from 'pg';
 import { INGEST_EVENT_TYPES, isValidIngestType } from '@testharbor/shared';
 
-const app = Fastify({ logger: true });
+function parsePositiveInt(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+const INGEST_BODY_LIMIT_BYTES = parsePositiveInt(
+  process.env.INGEST_BODY_LIMIT_BYTES || process.env.TESTHARBOR_BODY_LIMIT_BYTES,
+  150_000_000
+);
+
+const app = Fastify({ logger: true, bodyLimit: INGEST_BODY_LIMIT_BYTES });
 const port = Number(process.env.PORT || 4010);
 const databaseUrl = process.env.DATABASE_URL || 'postgres://testharbor:testharbor@localhost:5432/testharbor';
 const pool = new pg.Pool({ connectionString: databaseUrl });
@@ -556,6 +567,12 @@ app.post('/v1/ingest/events', async (request, reply) => {
 
 app.setErrorHandler((error, _request, reply) => {
   app.log.error(error);
+  if (error?.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+    return reply.code(413).send({
+      error: 'payload_too_large',
+      message: `Request body exceeds ingest body limit (${INGEST_BODY_LIMIT_BYTES} bytes). Reduce payload size or raise INGEST_BODY_LIMIT_BYTES.`
+    });
+  }
   return reply.code(500).send({ error: 'ingest_failed', detail: String(error.message || error) });
 });
 

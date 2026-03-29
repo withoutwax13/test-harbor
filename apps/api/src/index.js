@@ -3,7 +3,18 @@ import path from 'node:path';
 import Fastify from 'fastify';
 import pg from 'pg';
 
-const app = Fastify({ logger: true });
+function parsePositiveInt(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+const API_BODY_LIMIT_BYTES = parsePositiveInt(
+  process.env.API_BODY_LIMIT_BYTES || process.env.TESTHARBOR_BODY_LIMIT_BYTES,
+  150_000_000
+);
+
+const app = Fastify({ logger: true, bodyLimit: API_BODY_LIMIT_BYTES });
 const port = Number(process.env.PORT || 4000);
 const databaseUrl = process.env.DATABASE_URL || 'postgres://testharbor:testharbor@localhost:5432/testharbor';
 const pool = new pg.Pool({ connectionString: databaseUrl });
@@ -100,6 +111,19 @@ function parseBearerToken(headerValue) {
   const [scheme, token] = String(headerValue).split(' ');
   if (!scheme || !token || scheme.toLowerCase() !== 'bearer') return null;
   return token;
+}
+
+const binaryContentTypePatterns = [
+  /^application\/octet-stream(?:;.*)?$/i,
+  /^application\/x-binary(?:;.*)?$/i,
+  /^image\/.+/i,
+  /^video\/.+/i
+];
+
+for (const pattern of binaryContentTypePatterns) {
+  app.addContentTypeParser(pattern, { parseAs: 'buffer' }, (_request, body, done) => {
+    done(null, body);
+  });
 }
 
 async function query(sql, params = []) {
@@ -566,7 +590,9 @@ async function markArtifactGrantUsed(grantId) {
 
 async function fetchArtifactWithWorkspace(artifactId) {
   const artifactRes = await query(
-    `select a.id, a.run_id, a.spec_run_id, a.test_result_id, a.type, a.storage_key, a.content_type, a.byte_size, a.checksum, a.created_at, r.workspace_id
+    `select a.id, a.run_id, a.spec_run_id, a.test_result_id, a.type, a.storage_key, a.content_type, a.byte_size, a.checksum, a.created_at,
+            r.workspace_id,
+            exists(select 1 from artifact_blobs ab where ab.artifact_id = a.id) as has_content
      from artifacts a
      join runs r on r.id = a.run_id
      where a.id = $1`,
@@ -1837,10 +1863,11 @@ app.get('/v1/runs/:id', { preHandler: workspaceGuard({ role: 'viewer', resolveWo
     : { rows: [] };
 
   const artifacts = await query(
-    `select id, run_id, spec_run_id, test_result_id, type, storage_key, content_type, byte_size, checksum, created_at
-     from artifacts
-     where run_id = $1
-     order by created_at asc`,
+    `select a.id, a.run_id, a.spec_run_id, a.test_result_id, a.type, a.storage_key, a.content_type, a.byte_size, a.checksum, a.created_at,
+            exists(select 1 from artifact_blobs ab where ab.artifact_id = a.id) as has_content
+     from artifacts a
+     where a.run_id = $1
+     order by a.created_at asc`,
     [id]
   );
 
@@ -2649,6 +2676,12 @@ app.delete('/v1/organizations/:id/smoke-cleanup', async (request, reply) => {
 
 app.setErrorHandler((error, _req, reply) => {
   app.log.error(error);
+  if (error?.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+    return reply.code(413).send({
+      error: 'payload_too_large',
+      message: `Request body exceeds API body limit (${API_BODY_LIMIT_BYTES} bytes). Reduce payload size or raise API_BODY_LIMIT_BYTES.`
+    });
+  }
   if (error.code === '23505') return reply.code(409).send({ error: 'conflict', detail: error.detail });
   return reply.code(500).send({ error: 'internal_error' });
 });

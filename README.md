@@ -73,6 +73,18 @@ If you want a full smoke validation immediately after activation, run:
 npm run smoke:all
 ```
 
+To force a clean docker cache rebuild on startup/restart (useful if the UI appears stale after code changes), use:
+
+```bash
+TH_CLEAR_DOCKER_CACHE=1 npm run activate:local
+```
+
+You can also use the dedicated command:
+
+```bash
+npm run activate:local:clean
+```
+
 ## Cypress config UX (projectId-first)
 
 Use the reporter helper with **only** projectId in your Cypress config.

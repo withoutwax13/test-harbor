@@ -4,6 +4,19 @@ import path from 'node:path';
 import Fastify from 'fastify';
 
 const app = Fastify({ logger: true });
+
+function setNoStoreCache(reply) {
+  reply.header('cache-control', 'no-store, no-cache, must-revalidate, max-age=0');
+  reply.header('pragma', 'no-cache');
+  reply.header('expires', '0');
+}
+
+app.addHook('onSend', async (request, reply, payload) => {
+  if (String(request.url).startsWith('/app/')) {
+    setNoStoreCache(reply);
+  }
+  return payload;
+});
 const port = Number(process.env.PORT || 3000);
 const API_BASE_URL = (process.env.API_BASE_URL || 'http://localhost:4000').replace(/\/+$/, '');
 const INGEST_PUBLIC_BASE_URL = (process.env.INGEST_PUBLIC_BASE_URL || 'http://localhost:4010').replace(/\/+$/, '');
@@ -786,6 +799,8 @@ function renderRunDetailPage(shell, runDetail) {
       || contentType.startsWith('image/')
       || contentType.startsWith('video/');
   });
+  const mediaWithContent = mediaArtifacts.filter((artifact) => artifact.has_content === true);
+  const mediaWithoutContent = mediaArtifacts.filter((artifact) => artifact.has_content !== true);
   const screenshotCount = mediaArtifacts.filter((artifact) => {
     const type = String(artifact.type || '').toLowerCase();
     const contentType = String(artifact.content_type || '').toLowerCase();
@@ -895,10 +910,11 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
           ${metric('Media artifacts', mediaArtifacts.length)}
           ${metric('Screenshots', screenshotCount)}
           ${metric('Videos', videoCount)}
-          ${metric('All artifacts', artifacts.length)}
+          ${metric('Inline-ready', mediaWithContent.length)}
+          ${metric('Metadata-only', mediaWithoutContent.length)}
         </div>
-        ${mediaArtifacts.length ? `<div class="grid two-up artifact-preview-grid">
-          ${mediaArtifacts.slice(0, 24).map((artifact) => {
+        ${mediaWithContent.length ? `<div class="grid two-up artifact-preview-grid">
+          ${mediaWithContent.slice(0, 24).map((artifact) => {
             const contentType = String(artifact.content_type || '').toLowerCase();
             const type = String(artifact.type || '').toLowerCase();
             const isVideo = type.includes('video') || contentType.startsWith('video/');
@@ -913,13 +929,15 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
             </article>`;
           }).join('')}
         </div>` : '<div class="empty-state"><h3>No inline media yet</h3><p>Reporter must upload artifact bytes (not metadata only) for in-app previews.</p></div>'}
+        ${mediaWithoutContent.length ? `<div class="empty-state"><h3>${mediaWithoutContent.length} media artifact(s) have metadata only</h3><p>Binary bytes were not uploaded for these entries. Check reporter logs and ingest body limit (INGEST_BODY_LIMIT_BYTES).</p></div>` : ''}
         ${artifacts.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Type</th><th>Content type</th><th>Size</th><th>Created</th><th></th></tr></thead>
+          <thead><tr><th>Type</th><th>Content type</th><th>Size</th><th>Binary</th><th>Created</th><th></th></tr></thead>
           <tbody>
             ${artifacts.map((artifact) => `<tr>
               <td>${escapeHtml(artifact.type)}</td>
               <td>${escapeHtml(artifact.content_type || 'application/octet-stream')}</td>
               <td>${escapeHtml(formatBytes(artifact.byte_size))}</td>
+              <td>${artifact.has_content ? badge('available', 'success') : badge('missing', 'warning')}</td>
               <td>${escapeHtml(formatDate(artifact.created_at))}</td>
               <td><a class="text-link" href="/app/artifacts/${artifact.id}">View</a></td>
             </tr>`).join('')}
@@ -1011,7 +1029,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             <div class="panel"><div class="panel-header compact"><strong>Console</strong></div><pre id="replay-console" class="code-block"></pre></div>
             <div class="panel"><div class="panel-header compact"><strong>Network</strong></div><pre id="replay-network" class="code-block"></pre></div>
           </div>
-        </div>` : '<div class="empty-state"><h3>No replay events found</h3><p>Enable reporter replay hooks in Cypress support file to capture DOM/network/console data.</p></div>'}
+        </div>` : '<div class="empty-state"><h3>No replay events found</h3><p>Enable replay hooks in your Cypress support file to capture DOM/network/console data, then rerun tests.</p></div>'}
       </section>
       <script id="replay-data" type="application/json">${replayJson}</script>
       <script>
@@ -1068,6 +1086,7 @@ function renderArtifactPage(shell, detail) {
   const type = String(detail?.item?.type || '').toLowerCase();
   const isImage = type.includes('image') || contentType.startsWith('image/');
   const isVideo = type.includes('video') || contentType.startsWith('video/');
+  const hasContent = detail?.item?.has_content === true;
   const inlineUrl = `/app/artifacts/${detail?.item?.id || ''}/content`;
 
   return renderLayout({
@@ -1089,7 +1108,8 @@ function renderArtifactPage(shell, detail) {
           ${metric('Download expires', formatDate(detail?.download?.expiresAt))}
         </div>
         ${isImage || isVideo
-          ? `<div class="panel">
+          ? (hasContent
+            ? `<div class="panel">
               <div class="panel-header compact"><strong>Inline preview</strong></div>
               ${isVideo
                 ? `<video controls preload="metadata" src="${escapeHtml(inlineUrl)}"></video>`
@@ -1099,6 +1119,7 @@ function renderArtifactPage(shell, detail) {
                 <a class="button button-secondary" href="${escapeHtml(inlineUrl)}" download>Download</a>
               </div>
             </div>`
+            : '<div class="empty-state"><h3>Binary content missing</h3><p>This artifact currently has metadata only. Re-run with reporter binary upload enabled and ensure ingest body limit allows payload size.</p></div>')
           : '<div class="empty-state"><h3>Inline preview not available for this artifact type.</h3></div>'}
         <div class="panel">
           <div class="panel-header compact"><strong>Artifact metadata</strong></div>
@@ -1748,39 +1769,22 @@ app.get('/app/artifacts/:id/content', async (request, reply) => {
   if (!shell.session) return requireSession(request, reply);
 
   const artifactId = String(request.params.id);
-  const detail = await apiFetch(`/v1/artifacts/${artifactId}/sign-download`, { token: shell.session.token });
-
-  const signedUrl = String(detail?.download?.url || '');
-  let signedToken = '';
-  try {
-    const parsed = new URL(signedUrl);
-    signedToken = parsed.searchParams.get('token') || '';
-  } catch {
-    const fallbackQs = signedUrl.split('?')[1] || '';
-    if (fallbackQs) {
-      try {
-        const params = new URLSearchParams(fallbackQs);
-        signedToken = params.get('token') || '';
-      } catch {
-        signedToken = '';
-      }
+  const upstream = await apiFetchRaw(`/v1/artifacts/${artifactId}/content`, {
+    headers: {
+      authorization: `Bearer ${shell.session.token}`
     }
-  }
-
-  if (!signedToken) {
-    return reply.code(404).send({ error: 'artifact_download_token_not_found' });
-  }
-
-  const backend = String(detail?.download?.backend || 'local');
-  const upstream = await apiFetchRaw(`/v1/artifacts/download/${artifactId}?token=${encodeURIComponent(signedToken)}&backend=${encodeURIComponent(backend)}`);
+  });
 
   if (!upstream.ok) {
     const text = await upstream.text();
-    return reply.code(upstream.status).send({ error: `artifact_download_failed_${upstream.status}`, message: text || 'download_failed' });
+    return reply.code(upstream.status).send({
+      error: `artifact_content_proxy_failed_${upstream.status}`,
+      message: text || 'artifact_content_proxy_failed'
+    });
   }
 
   const bytes = await upstream.arrayBuffer();
-  const contentType = upstream.headers.get('content-type') || detail?.item?.content_type || 'application/octet-stream';
+  const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
   const contentLength = upstream.headers.get('content-length');
 
   reply.code(200).header('content-type', contentType);

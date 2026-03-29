@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf '%s\n' "[1/3] Starting core TestHarbor services..."
-docker compose up -d postgres redis minio ingest api worker web
+STACK_SERVICES="postgres redis minio ingest api worker web"
+REBUILD_MODE="${TH_CLEAR_DOCKER_CACHE:-0}"
 
-printf '%s\n' "[2/3] Applying migrations in containers..."
+if [[ "${REBUILD_MODE}" == "1" ]]; then
+  echo "[1/4] Clearing/rebuilding local stack images for ${STACK_SERVICES}..."
+  docker compose build --no-cache --pull ${STACK_SERVICES}
+  echo "[2/4] Starting local services (force recreate, remove-orphans)..."
+  docker compose up --force-recreate --remove-orphans -d ${STACK_SERVICES}
+else
+  echo "[1/4] Starting local services..."
+  docker compose up -d ${STACK_SERVICES}
+fi
+
+echo "[3/4] Applying migrations in containers..."
 npm run db:migrate:container
 
-printf '%s\n' "[3/3] Seeding local workspace/project + sample data..."
+echo "[4/4] Seeding local workspace/project + sample data..."
 npm run seed:local
 
-printf '%s\n' "Local stack is active. Services are up, migrations applied, seed loaded."
-printf '%s\n' "Run 'npm run smoke:all' for verification if you want a full end-to-end check."
+echo "Local stack is active. Services are up, migrations applied, seed loaded."
+echo "Run 'npm run smoke:all' for verification if you want a full end-to-end check."

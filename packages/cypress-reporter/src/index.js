@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 import { INGEST_EVENT_TYPES } from '@testharbor/shared';
 
 function sleep(ms) {
@@ -26,27 +27,72 @@ function toNumber(value, fallback = 0) {
 }
 
 function safeFileSize(filePath) {
-  if (!filePath) return null;
+  const resolvedFilePath = resolveArtifactPath(filePath);
+  if (!resolvedFilePath) return null;
   try {
-    return fs.statSync(filePath).size;
+    return fs.statSync(resolvedFilePath).size;
   } catch {
     return null;
   }
 }
 
+function resolveArtifactPath(filePath) {
+  if (!filePath || typeof filePath !== 'string') return null;
+
+  const raw = String(filePath).trim();
+  if (!raw) return null;
+
+  const normalized = path.normalize(raw);
+  const candidates = new Set();
+  candidates.add(normalized);
+  candidates.add(path.resolve(process.cwd(), normalized));
+
+  if (!path.isAbsolute(normalized)) {
+    candidates.add(path.join(process.cwd(), normalized));
+    candidates.add(path.join(process.cwd(), 'cypress', normalized));
+    candidates.add(path.join(process.cwd(), 'cypress', 'screenshots', path.basename(normalized)));
+    candidates.add(path.join(process.cwd(), 'cypress', 'videos', path.basename(normalized)));
+  }
+
+  if (normalized.includes('..')) {
+    const simplified = path.normalize(path.join(process.cwd(), normalized));
+    candidates.add(simplified);
+  }
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        return candidate;
+      }
+    } catch {
+      // continue
+    }
+  }
+
+  return null;
+}
+
 function readBinaryAsBase64(filePath, maxBytes = Number(process.env.TESTHARBOR_ARTIFACT_MAX_BASE64_BYTES || 100000000)) {
-  if (!filePath) return null;
+  const resolvedFilePath = resolveArtifactPath(filePath);
+  if (!resolvedFilePath) return null;
+
   try {
-    const buffer = fs.readFileSync(filePath);
+    const buffer = fs.readFileSync(resolvedFilePath);
     const max = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : Number.MAX_SAFE_INTEGER;
     if (!buffer || buffer.length === 0 || buffer.length > max) {
-      return { buffer: null, byteSize: buffer.length || 0 };
+      return {
+        buffer: null,
+        byteSize: buffer.length || 0,
+        reason: buffer.length > max ? 'size_limit' : 'empty',
+        sourcePath: resolvedFilePath
+      };
     }
     return {
       buffer,
       byteSize: buffer.length,
       contentBase64: buffer.toString('base64'),
-      checksum: crypto.createHash('sha256').update(buffer).digest('hex')
+      checksum: crypto.createHash('sha256').update(buffer).digest('hex'),
+      sourcePath: resolvedFilePath
     };
   } catch {
     return null;
@@ -238,13 +284,15 @@ export function setupTestHarbor(on, config, options = {}) {
     totalSpecs: 0
   };
 
-  const artifactMaxBytes = Number(
-    process.env.TESTHARBOR_ARTIFACT_MAX_BASE64_BYTES || 100000000
+  const artifactMaxBytes = toNumber(
+    process.env.TESTHARBOR_ARTIFACT_MAX_BASE64_BYTES,
+    100000000
   );
   const replayQueue = [];
+  const registeredArtifactDedupeKeys = new Set();
 
   function pushReplayEvent(event = {}) {
-    if (!event || typeof event !== 'object') return;
+    if (!event || typeof event !== 'object') return null;
     const enriched = {
       type: asTrimmedString(event.type) || 'replay.event',
       ts: toIso(event.ts || event.at || new Date()),
@@ -257,6 +305,7 @@ export function setupTestHarbor(on, config, options = {}) {
       domSnapshot: asTrimmedString(event.domSnapshot) || null
     };
     replayQueue.push(enriched);
+    return enriched;
   }
 
   async function flushReplayChunk(context = {}) {
@@ -274,6 +323,11 @@ export function setupTestHarbor(on, config, options = {}) {
     const artifactId = opts.artifactId || crypto.randomUUID();
     const type = asTrimmedString(opts.type) || 'artifact';
     const filePath = asTrimmedString(opts.filePath);
+    const dedupeKey = asTrimmedString(opts.dedupeKey);
+    if (dedupeKey && registeredArtifactDedupeKeys.has(dedupeKey)) {
+      return { artifactId, payload: null, uploaded: false, skipped: true, reason: 'duplicate' };
+    }
+
     const payload = {
       artifactId,
       runId,
@@ -294,7 +348,14 @@ export function setupTestHarbor(on, config, options = {}) {
     }
 
     await sendSafe(INGEST_EVENT_TYPES.ARTIFACT_REGISTERED, payload);
-    return { artifactId, payload, uploaded: Boolean(file && file.contentBase64) };
+    if (dedupeKey) registeredArtifactDedupeKeys.add(dedupeKey);
+    return {
+      artifactId,
+      payload,
+      uploaded: Boolean(file && file.contentBase64),
+      skipped: false,
+      reason: file && !file.contentBase64 ? 'inline_skipped_or_missing' : null
+    };
   }
 
 
@@ -327,10 +388,8 @@ export function setupTestHarbor(on, config, options = {}) {
             ts: toIso(event?.ts || entry?.at || new Date())
           });
         }
-        void sendSafe(INGEST_EVENT_TYPES.REPLAY_CHUNK, {
-          runId,
-          ...(specRunId ? { specRunId } : {}),
-          events
+        void flushReplayChunk({
+          ...(specRunId ? { specRunId } : {})
         }).catch(() => {});
       }
       return entry || null;
@@ -370,6 +429,7 @@ export function setupTestHarbor(on, config, options = {}) {
     const specRunId = findSpecRunId(specRunIds, specPath);
 
     const storageKey = asTrimmedString(details?.path) || `screenshots/${Date.now()}.png`;
+    const dedupeKey = `screenshot:${storageKey}:${runId}`;
     await registerArtifact({
       artifactId: crypto.randomUUID(),
       runId,
@@ -378,7 +438,8 @@ export function setupTestHarbor(on, config, options = {}) {
       storageKey,
       contentType: 'image/png',
       byteSize: safeFileSize(details?.path),
-      filePath: details?.path
+      filePath: details?.path,
+      dedupeKey
     });
 
     pushReplayEvent({
@@ -463,6 +524,7 @@ export function setupTestHarbor(on, config, options = {}) {
     for (const shot of screenshots) {
       const shotPath = asTrimmedString(shot?.path) || asTrimmedString(shot?.name);
       const storageKey = shotPath || `screenshots/${Date.now()}.png`;
+      const dedupeKey = `screenshot:${storageKey}:${runId}`;
       await registerArtifact({
         artifactId: crypto.randomUUID(),
         runId,
@@ -470,20 +532,23 @@ export function setupTestHarbor(on, config, options = {}) {
         type: 'screenshot',
         storageKey,
         contentType: 'image/png',
-        filePath: shotPath
+        filePath: shotPath,
+        dedupeKey
       });
     }
 
     if (results?.video) {
       const videoPath = asTrimmedString(results.video);
+      const storageKey = videoPath || `videos/${Date.now()}.mp4`;
       await registerArtifact({
         artifactId: crypto.randomUUID(),
         runId,
         specRunId,
         type: 'video',
-        storageKey: videoPath || `videos/${Date.now()}.mp4`,
+        storageKey,
         contentType: 'video/mp4',
-        filePath: videoPath
+        filePath: videoPath,
+        dedupeKey: `video:${storageKey}:${runId}`
       });
       if (videoPath) {
         pushReplayEvent({
