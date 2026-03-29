@@ -52,6 +52,7 @@ services:
       REDIS_URL: redis://redis:6379
       API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
       ALLOW_SMOKE_ORG_CLEANUP: ${ALLOW_SMOKE_ORG_CLEANUP:-0}
+      INGEST_BASE_URL: http://ingest:4010
     ports:
       - "4000:4000"
     depends_on:
@@ -67,6 +68,7 @@ services:
     environment:
       PORT: ${WEB_PORT:-3000}
       API_BASE_URL: http://api:4000
+      INGEST_PUBLIC_BASE_URL: ${INGEST_PUBLIC_BASE_URL:-http://localhost:4010}
     ports:
       - "3000:3000"
     depends_on:
@@ -95,6 +97,7 @@ services:
       DATABASE_URL: postgres://testharbor:testharbor@postgres:5432/testharbor
       REDIS_URL: redis://redis:6379
       API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
+      WORKER_HEARTBEAT_MS: ${WORKER_HEARTBEAT_MS:-10000}
     ports:
       - "4020:4020"
     depends_on:

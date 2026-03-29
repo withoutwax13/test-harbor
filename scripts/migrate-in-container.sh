@@ -9,7 +9,9 @@ for file in \
   infra/db/migrations/002_core_extensions.sql \
   infra/db/migrations/003_ingest_idempotency.sql \
   infra/db/migrations/004_webhook_deliveries.sql \
-  infra/db/migrations/005_batches_11_18.sql
+  infra/db/migrations/005_batches_11_18.sql \
+  infra/db/migrations/006_batches_19_26.sql \
+  infra/db/migrations/007_project_ingest_tokens.sql
 
 do
   echo "Applying $file ..."

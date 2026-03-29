@@ -29,7 +29,12 @@
     "smoke:webhooks:route-contract": "node scripts/smoke-webhooks-route-contract.mjs",
     "smoke:auth-explorer": "node scripts/smoke-auth-explorer.mjs",
     "smoke:notifications-retention": "node scripts/smoke-notifications-retention.mjs",
+    "smoke:web-shell": "node scripts/smoke-web-shell.mjs",
     "smoke:auth:explorer": "node scripts/smoke-auth-explorer.mjs",
-    "smoke:notifications:retention": "node scripts/smoke-notifications-retention.mjs"
+    "smoke:notifications:retention": "node scripts/smoke-notifications-retention.mjs",
+    "verify:batch19-26:static": "node scripts/verify-batch19-26.mjs static",
+    "verify:batch19-26:onboarding": "node scripts/verify-batch19-26.mjs onboarding",
+    "verify:batch19-26:cypress": "node scripts/verify-batch19-26.mjs cypress",
+    "parity:pack": "node scripts/parity-pack.mjs"
   }
 }

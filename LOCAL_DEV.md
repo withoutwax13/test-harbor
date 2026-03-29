@@ -1,6 +1,7 @@
 # Local Dev Quickstart (Windows-safe defaults)
 
 ## Ports used
+- Web: `3000`
 - API: `4000`
 - Ingest: `4010`
 - Postgres: `5433 -> 5432` (container)
@@ -14,7 +15,7 @@
 ```
 
 This runs:
-1. `docker compose up -d postgres redis minio ingest api worker`
+1. `docker compose up -d postgres redis minio ingest api worker web`
 2. `npm run db:migrate:container`
 3. `npm run seed:local`
 4. `npm run smoke:all`
@@ -22,7 +23,7 @@ This runs:
 ## Manual fallback
 
 ```bash
-docker compose up -d postgres redis minio ingest api worker
+docker compose up -d postgres redis minio ingest api worker web
 npm run db:migrate:container
 npm run seed:local
 npm run smoke:all
@@ -33,6 +34,49 @@ npm run smoke:all
 - **Port conflicts** on 5432/6379: keep the compose remaps (5433/6380).
 - **`psql: command not found`**: use `npm run db:migrate:container` (no host psql needed).
 - **API unreachable**: `docker compose up -d api && docker compose logs --tail=120 api`.
+
+## Browser flow
+
+1. Open `http://localhost:3000/login`.
+2. Sign in with a local name and email.
+3. Use `/app/onboarding` to create or select a workspace and project.
+4. Mint a **project ingest token** (shown once on creation, then stored as hash+hint only).
+5. Copy the Cypress-first connect snippet and emit `run.started`.
+6. Use `/app/connect` to inspect API, ingest, and worker health, then queue a test event.
+7. Use `/app/team` for member add/update/remove and role management.
+8. Use `/app/runs`, `/app/runs/:id`, and `/app/tests/:id/history` for triage (including date filters).
+9. Use `/app/admin` for webhook endpoint management, secret rotate/clear, and grouped delivery timeline.
+
+Browser smoke:
+
+```bash
+npm run smoke:web-shell
+```
+
+Parity evidence pack:
+
+```bash
+npm run parity:pack
+```
+
+Project token quick issue:
+
+```bash
+curl -X POST "http://localhost:4000/v1/projects/<projectId>/ingest-tokens" \
+  -H "Authorization: Bearer <api-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"local-cypress","ttlDays":30}'
+```
+
+Use returned token as `TESTHARBOR_INGEST_TOKEN` for ingest/Cypress reporter calls.
+
+Optional shell capture when web is reachable and you have a session token:
+
+```bash
+TH_PARITY_WEB_BASE_URL=http://localhost:3000 \
+TH_AUTH_TOKEN='<session-token-from-/v1/auth/login>' \
+npm run parity:pack
+```
 
 ## Auth (optional)
 Set these in `.env` to enforce bearer auth:

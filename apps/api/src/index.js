@@ -20,6 +20,11 @@ const STORAGE_PREFIX = (process.env.STORAGE_PREFIX || 'artifacts').replace(/^\/+
 const ARTIFACT_PROXY_MODE = process.env.ARTIFACT_PROXY_MODE || 'json';
 const DEFAULT_ANALYTICS_SEED = process.env.ANALYTICS_SEED || 'testharbor-v1';
 const ENABLE_AUDIT_LOGS = process.env.ENABLE_AUDIT_LOGS !== '0';
+const INGEST_BASE_URL = (process.env.INGEST_BASE_URL || 'http://localhost:4010').replace(/\/+$/, '');
+const SYSTEM_STATUS_TIMEOUT_MS = Number(process.env.SYSTEM_STATUS_TIMEOUT_MS || 4000);
+const WORKER_HEARTBEAT_STALE_SEC = Number(process.env.WORKER_HEARTBEAT_STALE_SEC || 60);
+const PROJECT_INGEST_TOKEN_DEFAULT_TTL_DAYS = Number(process.env.PROJECT_INGEST_TOKEN_DEFAULT_TTL_DAYS || 90);
+const PROJECT_INGEST_TOKEN_MAX_TTL_DAYS = Number(process.env.PROJECT_INGEST_TOKEN_MAX_TTL_DAYS || 365);
 
 const ROLE_RANK = {
   viewer: 0,
@@ -27,6 +32,8 @@ const ROLE_RANK = {
   admin: 2,
   owner: 3
 };
+
+const WORKSPACE_ROLES = Object.keys(ROLE_RANK);
 
 function hashText(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
@@ -136,6 +143,30 @@ function ensureArray(value) {
   return [];
 }
 
+function normalizeBaseUrl(url) {
+  return String(url || '').replace(/\/+$/, '');
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = SYSTEM_STATUS_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    const text = await res.text();
+    let body = {};
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      body = { raw: text };
+    }
+    return { ok: res.ok, status: res.status, body };
+  } catch (error) {
+    return { ok: false, status: 0, body: { error: String(error?.message || error) } };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function recordAuditLog({ workspaceId, actorUserId = null, action, entityType, entityId, meta = null }) {
   if (!ENABLE_AUDIT_LOGS || !workspaceId) return;
   await query(
@@ -143,6 +174,84 @@ async function recordAuditLog({ workspaceId, actorUserId = null, action, entityT
      values ($1, $2, $3, $4, $5, $6::jsonb)`,
     [workspaceId, actorUserId, action, entityType, String(entityId), meta ? JSON.stringify(meta) : null]
   );
+}
+
+async function readWorkerStatus() {
+  const heartbeatRes = await query(
+    `select service_name, last_seen_at, meta_json, updated_at
+     from service_heartbeats
+     where service_name = 'worker'`
+  );
+  const deliveryRes = await query(
+    `select
+       count(*) filter (where status = 'queued')::int as queued,
+       count(*) filter (where status = 'retry_scheduled')::int as retry_scheduled,
+       count(*) filter (where status = 'delivering')::int as delivering,
+       count(*) filter (where status = 'dead')::int as dead
+     from webhook_deliveries`
+  );
+  const heartbeat = heartbeatRes.rows[0] || null;
+  const counts = deliveryRes.rows[0] || { queued: 0, retry_scheduled: 0, delivering: 0, dead: 0 };
+
+  if (!heartbeat) {
+    return {
+      ok: false,
+      state: 'missing',
+      staleSeconds: null,
+      heartbeat: null,
+      queue: counts
+    };
+  }
+
+  const staleSeconds = Math.max(0, Math.floor((Date.now() - new Date(heartbeat.last_seen_at).getTime()) / 1000));
+  return {
+    ok: staleSeconds <= WORKER_HEARTBEAT_STALE_SEC,
+    state: staleSeconds <= WORKER_HEARTBEAT_STALE_SEC ? 'up' : 'stale',
+    staleSeconds,
+    heartbeat,
+    queue: counts
+  };
+}
+
+async function buildSystemStatus() {
+  let db = 'down';
+  try {
+    await query('select 1');
+    db = 'up';
+  } catch {
+    db = 'down';
+  }
+
+  const ingest = await fetchJsonWithTimeout(`${normalizeBaseUrl(INGEST_BASE_URL)}/healthz`);
+  const worker = await readWorkerStatus();
+  const recentRuns = await query(
+    `select count(*)::int as count
+     from runs
+     where created_at >= now() - interval '24 hours'`
+  );
+
+  return {
+    ok: db === 'up' && ingest.ok && worker.ok,
+    generatedAt: new Date().toISOString(),
+    services: {
+      api: {
+        ok: db === 'up',
+        state: db === 'up' ? 'up' : 'down',
+        db,
+        storageBackend: STORAGE_BACKEND
+      },
+      ingest: {
+        ok: ingest.ok && ingest.body?.ok === true,
+        state: ingest.ok && ingest.body?.ok === true ? 'up' : 'down',
+        baseUrl: INGEST_BASE_URL,
+        response: ingest.body
+      },
+      worker
+    },
+    metrics: {
+      recentRuns24h: Number(recentRuns.rows[0]?.count || 0)
+    }
+  };
 }
 
 async function getUserById(userId) {
@@ -440,6 +549,45 @@ async function markArtifactGrantUsed(grantId) {
   );
 }
 
+function createProjectIngestTokenRaw() {
+  const random = crypto.randomBytes(24).toString('base64url');
+  return `thpit.${random}`;
+}
+
+function tokenHint(token) {
+  const value = String(token || '');
+  if (!value) return '';
+  return value.length <= 8 ? value : value.slice(-8);
+}
+
+function normalizeTtlDays(input, fallbackDays, maxDays) {
+  if (input === undefined || input === null || input === '') return { ok: true, value: fallbackDays };
+  const parsed = Number(input);
+  if (!Number.isFinite(parsed)) return { ok: false, error: 'ttlDays must be a number' };
+  const days = Math.floor(parsed);
+  if (days <= 0) return { ok: false, error: 'ttlDays must be a positive integer' };
+  if (days > maxDays) return { ok: false, error: `ttlDays must be <= ${maxDays}` };
+  return { ok: true, value: days };
+}
+
+function buildExpiresAtFromTtlDays(ttlDays, fromDate = new Date()) {
+  return new Date(fromDate.getTime() + ttlDays * 24 * 60 * 60 * 1000);
+}
+
+function parseExpiresAtInput(value) {
+  if (value === undefined || value === '') return { provided: false, value: null };
+  if (value === null) return { provided: true, value: null };
+  if (String(value).trim().toLowerCase() === 'null') return { provided: true, value: null };
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return { provided: true, error: 'expiresAt must be a valid ISO timestamp or null' };
+  return { provided: true, value: parsed };
+}
+
+function projectIngestTokenState(token) {
+  if (token.revoked_at) return 'revoked';
+  if (token.expires_at && new Date(token.expires_at).getTime() <= Date.now()) return 'expired';
+  return 'active';
+}
 function buildSlackPayload({ run, summary, failures, workspaceId }) {
   return {
     text: `Run ${run.id} ${run.status} in workspace ${workspaceId}`,
@@ -864,6 +1012,13 @@ app.get('/healthz', async () => {
   };
 });
 
+app.get('/v1/system/status', async (request, reply) => {
+  if (!request.auth?.isService && !request.auth?.userId) {
+    return reply.code(401).send({ error: 'unauthorized' });
+  }
+  return buildSystemStatus();
+});
+
 app.post('/v1/auth/login', async (request, reply) => {
   const { email, name, avatarUrl = null } = request.body || {};
   if (!email || !name) {
@@ -1021,6 +1176,25 @@ app.post('/v1/workspaces/:id/members', { preHandler: workspaceGuard({ role: 'adm
     return reply.code(400).send({ error: 'userId or email is required' });
   }
 
+  const existingMemberRes = await query(
+    `select role
+     from workspace_members
+     where workspace_id = $1 and user_id = $2`,
+    [id, targetUserId]
+  );
+  const existingRole = existingMemberRes.rows[0]?.role || null;
+  if (existingRole === 'owner' && role !== 'owner') {
+    const ownersRes = await query(
+      `select count(*)::int as count
+       from workspace_members
+       where workspace_id = $1 and role = 'owner' and user_id <> $2`,
+      [id, targetUserId]
+    );
+    if (Number(ownersRes.rows[0]?.count || 0) === 0) {
+      return reply.code(400).send({ error: 'workspace_requires_owner' });
+    }
+  }
+
   const memberRes = await query(
     `insert into workspace_members(workspace_id, user_id, role)
      values ($1, $2, $3)
@@ -1042,6 +1216,118 @@ app.post('/v1/workspaces/:id/members', { preHandler: workspaceGuard({ role: 'adm
   return reply.code(201).send({ item: memberRes.rows[0] });
 });
 
+
+
+app.get('/v1/workspaces/:id/members', { preHandler: workspaceGuard({ role: 'admin', resolveWorkspaceId: 'params.id' }) }, async (request, reply) => {
+  const { id } = request.params;
+  const { rows } = await query(
+    `select wm.id, wm.workspace_id, wm.user_id, wm.role, wm.created_at,
+            u.email, u.name, u.avatar_url
+     from workspace_members wm
+     join users u on u.id = wm.user_id
+     where wm.workspace_id = $1
+     order by wm.created_at asc`,
+    [id]
+  );
+
+  return { items: rows };
+});
+
+
+
+app.patch('/v1/workspaces/:id/members/:userId', { preHandler: workspaceGuard({ role: 'admin', resolveWorkspaceId: 'params.id' }) }, async (request, reply) => {
+  const { id, userId } = request.params;
+  const role = String(request.body?.role || '').trim();
+
+  if (!role || !ROLE_RANK.hasOwnProperty(role)) {
+    return reply.code(400).send({ error: 'role must be owner|admin|member|viewer' });
+  }
+
+  const memberRes = await query(
+    `select id, role
+     from workspace_members
+     where workspace_id = $1 and user_id = $2`,
+    [id, userId]
+  );
+  const member = memberRes.rows[0] || null;
+  if (!member) return reply.code(404).send({ error: 'not_found' });
+
+  if (member.role === 'owner' && role !== 'owner') {
+    const ownersRes = await query(
+      `select count(*)::int as count
+       from workspace_members
+       where workspace_id = $1 and role = 'owner' and user_id <> $2`,
+      [id, userId]
+    );
+    if (Number(ownersRes.rows[0]?.count || 0) === 0) {
+      return reply.code(400).send({ error: 'workspace_requires_owner' });
+    }
+  }
+
+  const updated = await query(
+    `update workspace_members
+     set role = $3
+     where workspace_id = $1 and user_id = $2
+     returning *`,
+    [id, userId, role]
+  );
+
+  await recordAuditLog({
+    workspaceId: id,
+    actorUserId: request.auth?.userId,
+    action: 'workspace.member.role_updated',
+    entityType: 'workspace_member',
+    entityId: updated.rows[0].id,
+    meta: { userId, role }
+  });
+
+  return reply.code(200).send({ item: updated.rows[0] });
+});
+app.delete('/v1/workspaces/:id/members/:userId', { preHandler: workspaceGuard({ role: 'admin', resolveWorkspaceId: 'params.id' }) }, async (request, reply) => {
+  const { id, userId } = request.params;
+
+  const memberRes = await query(
+    `select id, role
+     from workspace_members
+     where workspace_id = $1 and user_id = $2`,
+    [id, userId]
+  );
+
+  const member = memberRes.rows[0] || null;
+  if (!member) return reply.code(404).send({ error: 'not_found' });
+
+  if (member.role === 'owner') {
+    const ownersRes = await query(
+      `select count(*)::int as count
+       from workspace_members
+       where workspace_id = $1 and role = 'owner' and user_id <> $2`,
+      [id, userId]
+    );
+    if (Number(ownersRes.rows[0]?.count || 0) === 0) {
+      return reply.code(400).send({ error: 'workspace_requires_owner' });
+    }
+  }
+
+  const deleted = await query(
+    `delete from workspace_members
+     where workspace_id = $1 and user_id = $2
+     returning id`,
+    [id, userId]
+  );
+
+  if (!deleted.rows.length) return reply.code(404).send({ error: 'not_found' });
+
+  await recordAuditLog({
+    workspaceId: id,
+    actorUserId: request.auth?.userId,
+    action: 'workspace.member.removed',
+    entityType: 'workspace_member',
+    entityId: deleted.rows[0].id,
+    meta: { userId }
+  });
+
+  return reply.code(204).send();
+});
 app.delete('/v1/workspaces/:id', { preHandler: workspaceGuard({ role: 'owner', resolveWorkspaceId: 'params.id' }) }, async (request, reply) => {
   const { id } = request.params;
   const { rows } = await query(
@@ -1166,6 +1452,244 @@ app.get('/v1/projects/:id/latest-run', { preHandler: workspaceGuard({ role: 'vie
   );
   if (!rows.length) return reply.code(404).send({ error: 'not_found' });
   return { item: rows[0] };
+});
+
+
+
+app.get('/v1/projects/:id/ingest-tokens', { preHandler: workspaceGuard({ role: 'admin', resolveWorkspaceId: 'projectParam' }) }, async (request, reply) => {
+  const { id } = request.params;
+  const limit = normalizeLimit(request.query?.limit, 50, 200);
+
+  const projectRes = await query('select id from projects where id = $1', [id]);
+  if (!projectRes.rows.length) return reply.code(404).send({ error: 'not_found' });
+
+  const { rows } = await query(
+    `select id, workspace_id, project_id, label, token_hint, created_by, last_used_at,
+            expires_at, revoked_at, revoked_by, created_at,
+            case
+              when revoked_at is not null then 'revoked'
+              when expires_at is not null and expires_at <= now() then 'expired'
+              else 'active'
+            end as state
+     from project_ingest_tokens
+     where project_id = $1
+     order by created_at desc
+     limit $2`,
+    [id, limit]
+  );
+
+  return { items: rows };
+});
+
+app.post('/v1/projects/:id/ingest-tokens', { preHandler: workspaceGuard({ role: 'admin', resolveWorkspaceId: 'projectParam' }) }, async (request, reply) => {
+  const { id } = request.params;
+  const { label, ttlDays = null } = request.body || {};
+  const trimmedLabel = String(label || '').trim();
+  if (!trimmedLabel) return reply.code(400).send({ error: 'label is required' });
+
+  const projectRes = await query(
+    `select id, workspace_id, name, slug
+     from projects
+     where id = $1`,
+    [id]
+  );
+  const project = projectRes.rows[0] || null;
+  if (!project) return reply.code(404).send({ error: 'not_found' });
+
+  const ttl = normalizeTtlDays(ttlDays, PROJECT_INGEST_TOKEN_DEFAULT_TTL_DAYS, PROJECT_INGEST_TOKEN_MAX_TTL_DAYS);
+  if (!ttl.ok) {
+    return reply.code(400).send({ error: ttl.error });
+  }
+
+  const expiresAt = buildExpiresAtFromTtlDays(ttl.value);
+  const token = createProjectIngestTokenRaw();
+
+  const created = await query(
+    `insert into project_ingest_tokens(
+       workspace_id, project_id,
+       label, token_hash, token_hint,
+       created_by,
+       last_used_at,
+       expires_at,
+       meta_json
+     )
+     values ($1, $2, $3, $4, $5, $6, null, $7::timestamptz, $8::jsonb)
+     returning id, workspace_id, project_id, label, token_hint, created_by, last_used_at,
+               expires_at, revoked_at, revoked_by, created_at`,
+    [project.workspace_id, project.id, trimmedLabel, hashText(token), tokenHint(token), request.auth?.userId || null, expiresAt, JSON.stringify({ ttlDays: ttl.value })]
+  );
+
+  const item = created.rows[0];
+
+  await recordAuditLog({
+    workspaceId: project.workspace_id,
+    actorUserId: request.auth?.userId,
+    action: 'project.ingest_token.created',
+    entityType: 'project_ingest_token',
+    entityId: item.id,
+    meta: { projectId: project.id, label: trimmedLabel, ttlDays: ttl.value, expiresAt: expiresAt.toISOString() }
+  });
+
+  return reply.code(201).send({
+    token,
+    item: {
+      ...item,
+      state: projectIngestTokenState(item)
+    }
+  });
+});
+
+app.patch('/v1/projects/:id/ingest-tokens/:tokenId', { preHandler: workspaceGuard({ role: 'admin', resolveWorkspaceId: 'projectParam' }) }, async (request, reply) => {
+  const { id, tokenId } = request.params;
+  const { label, ttlDays, expiresAt } = request.body || {};
+
+  if (ttlDays !== undefined && ttlDays !== null && ttlDays !== '' && expiresAt !== undefined) {
+    return reply.code(400).send({ error: 'provide either ttlDays or expiresAt, not both' });
+  }
+
+  const projectRes = await query(
+    `select id, workspace_id
+     from projects
+     where id = $1`,
+    [id]
+  );
+  const project = projectRes.rows[0] || null;
+  if (!project) return reply.code(404).send({ error: 'not_found' });
+
+  const tokenRes = await query(
+    `select id, workspace_id, project_id, label, expires_at, revoked_at, created_at
+     from project_ingest_tokens
+     where id = $1 and project_id = $2`,
+    [tokenId, id]
+  );
+  const tokenRow = tokenRes.rows[0] || null;
+  if (!tokenRow) return reply.code(404).send({ error: 'not_found' });
+  if (tokenRow.revoked_at) return reply.code(400).send({ error: 'cannot_update_revoked_token' });
+
+  const updates = [];
+  const values = [tokenId, id];
+  let valueIdx = 3;
+  const auditMeta = { projectId: id };
+
+  if (label !== undefined) {
+    const trimmedLabel = String(label || '').trim();
+    if (!trimmedLabel) return reply.code(400).send({ error: 'label cannot be empty' });
+    updates.push(`label = $${valueIdx++}`);
+    values.push(trimmedLabel);
+    auditMeta.label = trimmedLabel;
+  }
+
+  if (ttlDays !== undefined && ttlDays !== null && ttlDays !== '') {
+    const ttl = normalizeTtlDays(ttlDays, PROJECT_INGEST_TOKEN_DEFAULT_TTL_DAYS, PROJECT_INGEST_TOKEN_MAX_TTL_DAYS);
+    if (!ttl.ok) return reply.code(400).send({ error: ttl.error });
+    const nextExpiresAt = buildExpiresAtFromTtlDays(ttl.value);
+    updates.push(`expires_at = $${valueIdx++}::timestamptz`);
+    values.push(nextExpiresAt.toISOString());
+    updates.push(`meta_json = coalesce(meta_json, '{}'::jsonb) || $${valueIdx++}::jsonb`);
+    values.push(JSON.stringify({ ttlDays: ttl.value }));
+    auditMeta.ttlDays = ttl.value;
+    auditMeta.expiresAt = nextExpiresAt.toISOString();
+  } else {
+    const parsedExpires = parseExpiresAtInput(expiresAt);
+    if (parsedExpires.error) return reply.code(400).send({ error: parsedExpires.error });
+    if (parsedExpires.provided) {
+      if (parsedExpires.value && parsedExpires.value.getTime() <= Date.now()) {
+        return reply.code(400).send({ error: 'expiresAt must be in the future' });
+      }
+      updates.push(`expires_at = $${valueIdx++}::timestamptz`);
+      values.push(parsedExpires.value ? parsedExpires.value.toISOString() : null);
+      auditMeta.expiresAt = parsedExpires.value ? parsedExpires.value.toISOString() : null;
+    }
+  }
+
+  if (!updates.length) {
+    return reply.code(400).send({ error: 'No changes requested. Provide label, ttlDays, or expiresAt.' });
+  }
+
+  const updated = await query(
+    `update project_ingest_tokens
+     set ${updates.join(', ')}
+     where id = $1 and project_id = $2
+     returning id, workspace_id, project_id, label, token_hint, created_by, last_used_at,
+               expires_at, revoked_at, revoked_by, created_at`,
+    values
+  );
+
+  const item = updated.rows[0] || null;
+  if (!item) return reply.code(404).send({ error: 'not_found' });
+
+  await recordAuditLog({
+    workspaceId: project.workspace_id,
+    actorUserId: request.auth?.userId,
+    action: 'project.ingest_token.updated',
+    entityType: 'project_ingest_token',
+    entityId: item.id,
+    meta: auditMeta
+  });
+
+  return reply.code(200).send({
+    item: {
+      ...item,
+      state: projectIngestTokenState(item)
+    }
+  });
+});
+
+app.post('/v1/projects/:id/ingest-tokens/:tokenId/revoke', { preHandler: workspaceGuard({ role: 'admin', resolveWorkspaceId: 'projectParam' }) }, async (request, reply) => {
+  const { id, tokenId } = request.params;
+
+  const projectRes = await query(
+    `select id, workspace_id
+     from projects
+     where id = $1`,
+    [id]
+  );
+  const project = projectRes.rows[0] || null;
+  if (!project) return reply.code(404).send({ error: 'not_found' });
+
+  const tokenRes = await query(
+    `select id, revoked_at
+     from project_ingest_tokens
+     where id = $1 and project_id = $2`,
+    [tokenId, id]
+  );
+  const tokenRow = tokenRes.rows[0] || null;
+  if (!tokenRow) return reply.code(404).send({ error: 'not_found' });
+
+  if (!tokenRow.revoked_at) {
+    await query(
+      `update project_ingest_tokens
+       set revoked_at = now(), revoked_by = $3
+       where id = $1 and project_id = $2`,
+      [tokenId, id, request.auth?.userId || null]
+    );
+
+    await recordAuditLog({
+      workspaceId: project.workspace_id,
+      actorUserId: request.auth?.userId,
+      action: 'project.ingest_token.revoked',
+      entityType: 'project_ingest_token',
+      entityId: tokenId,
+      meta: { projectId: id }
+    });
+  }
+
+  const refreshed = await query(
+    `select id, workspace_id, project_id, label, token_hint, created_by, last_used_at,
+            expires_at, revoked_at, revoked_by, created_at
+     from project_ingest_tokens
+     where id = $1 and project_id = $2`,
+    [tokenId, id]
+  );
+  const item = refreshed.rows[0] || null;
+  if (!item) return reply.code(404).send({ error: 'not_found' });
+
+  return reply.code(200).send({
+    item: {
+      ...item,
+      state: projectIngestTokenState(item)
+    }
+  });
 });
 
 app.get('/v1/runs', { preHandler: workspaceGuard({ role: 'viewer', resolveWorkspaceId: 'query.workspaceId' }) }, async (request, reply) => {
