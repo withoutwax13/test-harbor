@@ -1124,7 +1124,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
       <p>Try moving the slider to steps near <code>replay.dom.snapshot</code> events.</p>
     </body></html>`;
 
-  const initialDomSrcDoc = initialDomSnapshot || initialDomFallback;
+  const initialDomSrcDoc = initialDomFallback;
   const initialReplayTitle = initialEvent
     ? `${initialEvent.type || 'replay.event'} @ ${formatDate(initialEvent.ts)}`
     : '';
@@ -1150,7 +1150,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
     return `<button type="button" data-step="${idx}" class="button button-secondary replay-step-button${activeClass}" style="justify-content:flex-start; text-align:left; width:100%;">${escapeHtml(rowText)}</button>`;
   }).join('');
 
-  const replayJson = JSON.stringify(normalized).replaceAll('<', '\u003c');
+  const replayJsonBase64 = Buffer.from(JSON.stringify(normalized), 'utf8').toString('base64');
 
   const consoleEntryCount = normalized.reduce((n, event) => n + extractConsole(event).length, 0);
   const networkEntryCount = normalized.reduce((n, event) => n + extractNetwork(event).length, 0);
@@ -1183,38 +1183,47 @@ function renderRunReplayPage(shell, replayDetail, runId) {
         </div>
         ${normalized.length ? `<div class="stack">
           <input id="replay-step" type="range" min="0" max="${Math.max(0, normalized.length - 1)}" value="${initialIndex}" />
-          <div class="grid two-up">
+          <div class="grid two-up replay-grid">
             <div class="panel">
               <div class="panel-header compact"><strong>Steps</strong><small id="replay-step-meta">${initialIndex + 1} / ${normalized.length}</small></div>
               <div id="replay-step-list" class="stack" style="max-height: 360px; overflow: auto;">${initialStepListHtml}</div>
             </div>
             <div class="panel">
               <div class="panel-header compact"><strong>Reconstructed DOM</strong><small id="replay-event-title">${escapeHtml(initialReplayTitle)}</small></div>
-              <iframe id="replay-frame" srcdoc="${escapeHtml(initialDomSrcDoc)}" style="width:100%; min-height:420px; border:1px solid var(--border); border-radius:12px;"></iframe>
+              <iframe id="replay-frame" sandbox="" referrerpolicy="no-referrer" srcdoc="${escapeHtml(initialDomSrcDoc)}" style="width:100%; min-height:420px; border:1px solid var(--border); border-radius:12px; background:#fff;"></iframe>
             </div>
           </div>
-          <div class="grid two-up">
+          <div class="grid two-up replay-grid">
             <div class="panel"><div class="panel-header compact"><strong>Console (cumulative)</strong></div><pre id="replay-console" class="code-block">${escapeHtml(initialConsoleText)}</pre></div>
             <div class="panel"><div class="panel-header compact"><strong>Network (cumulative)</strong></div><pre id="replay-network" class="code-block">${escapeHtml(initialNetworkText)}</pre></div>
           </div>
           <div class="panel"><div class="panel-header compact"><strong>Cypress Runner Log (cumulative)</strong></div><pre id="replay-runner-log" class="code-block">${escapeHtml(initialRunnerText)}</pre></div>
         </div>` : '<div class="empty-state"><h3>No replay events found</h3><p>Enable replay hooks in your Cypress support file to capture DOM/network/console data, then rerun tests.</p></div>'}
       </section>
-      <script id="replay-data" type="application/json">${replayJson}</script>
+      <script id="replay-data" type="text/plain">${replayJsonBase64}</script>
       <script>
         (function () {
           var dataNode = document.getElementById('replay-data');
           if (!dataNode) return;
 
           var events = [];
-          try {
-            events = JSON.parse(dataNode.textContent || '[]');
-          } catch (error) {
-            // eslint-disable-next-line no-console
-            console.warn('[testharbor] replay JSON parse failed', error && error.message ? error.message : error);
-            events = [];
+          function decodeReplayData(encoded) {
+            if (!encoded) return [];
+            try {
+              var binary = atob(String(encoded).trim());
+              var bytes = new Uint8Array(binary.length);
+              for (var i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+              var decoded = new TextDecoder('utf-8').decode(bytes);
+              var parsed = JSON.parse(decoded || '[]');
+              return Array.isArray(parsed) ? parsed : [];
+            } catch (error) {
+              // eslint-disable-next-line no-console
+              console.warn('[testharbor] replay payload decode failed', error && error.message ? error.message : error);
+              return [];
+            }
           }
-          if (!Array.isArray(events)) events = [];
+
+          events = decodeReplayData(dataNode.textContent || '');
 
           var slider = document.getElementById('replay-step');
           var list = document.getElementById('replay-step-list');
@@ -1271,6 +1280,145 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             return Number.isNaN(date.getTime()) ? firstNonEmpty(value, 'n/a') : date.toISOString();
           }
 
+          function decodeHtmlEntities(value) {
+            var textarea = document.createElement('textarea');
+            textarea.innerHTML = String(value || '');
+            return textarea.value;
+          }
+
+          function normalizeSerializedText(value) {
+            var text = firstNonEmpty(value);
+            if (!text) return '';
+            text = String(text).trim();
+
+            for (var pass = 0; pass < 3; pass += 1) {
+              var changed = false;
+
+              if (text.startsWith('"') && text.endsWith('"')) {
+                try {
+                  var parsed = JSON.parse(text);
+                  if (typeof parsed === 'string') {
+                    text = String(parsed).trim();
+                    changed = true;
+                    continue;
+                  }
+                } catch (error) {
+                  // ignore parse attempt
+                }
+              }
+
+              var unescaped = text
+                .replace(/\\n/g, '\\n')
+                .replace(/\\r/g, '\\r')
+                .replace(/\\t/g, '\\t')
+                .replace(/\\"/g, '"')
+                .replace(/\\'/g, "'");
+
+              if (unescaped !== text) {
+                text = unescaped;
+                changed = true;
+              }
+
+              if (text.indexOf('%') !== -1) {
+                try {
+                  var decoded = decodeURIComponent(text);
+                  if (decoded && decoded !== text) {
+                    text = decoded.trim();
+                    changed = true;
+                  }
+                } catch (error) {
+                  // ignore decode attempt
+                }
+              }
+
+              if (!changed) break;
+            }
+
+            if (text.startsWith('&lt;') || text.indexOf('&quot;') !== -1 || text.indexOf('&#39;') !== -1 || text.indexOf('&amp;') !== -1) {
+              text = decodeHtmlEntities(text);
+            }
+
+            if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+              var maybe = text.slice(1, -1).trim();
+              if (maybe.startsWith('<') || maybe.startsWith('{') || maybe.startsWith('http') || maybe.startsWith('/')) {
+                text = maybe;
+              }
+            }
+
+            return text;
+          }
+
+          function cleanReplayUrl(value) {
+            var raw = normalizeSerializedText(value).trim();
+            if (!raw) return '';
+
+            if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+              raw = raw.slice(1, -1).trim();
+            }
+
+            var lower = raw.toLowerCase();
+            if (!lower) return '';
+            if (lower.startsWith('data:image/') || lower.startsWith('data:video/') || lower.startsWith('blob:') || lower.startsWith('#')) {
+              return raw;
+            }
+            if (lower.startsWith('javascript:') || lower.startsWith('data:text/html')) {
+              return 'about:blank';
+            }
+            if (lower.startsWith('http://') || lower.startsWith('https://') || lower.startsWith('//') || lower.startsWith('/')) {
+              return 'about:blank#blocked';
+            }
+            return raw;
+          }
+
+          function sanitizeSnapshotHtml(value) {
+            var html = normalizeSerializedText(value);
+            if (!html) return '';
+
+            try {
+              var parser = new DOMParser();
+              var doc = parser.parseFromString(html, 'text/html');
+              if (!doc || !doc.documentElement) return html;
+
+              var blocked = doc.querySelectorAll('script, noscript, iframe, object, embed, base, meta[http-equiv="refresh"]');
+              for (var i = 0; i < blocked.length; i += 1) blocked[i].remove();
+
+              var urlAttrs = {
+                src: true,
+                href: true,
+                action: true,
+                poster: true,
+                data: true,
+                'xlink:href': true
+              };
+
+              var all = doc.querySelectorAll('*');
+              for (var nodeIndex = 0; nodeIndex < all.length; nodeIndex += 1) {
+                var el = all[nodeIndex];
+                var attrs = Array.from(el.attributes || []);
+                for (var attrIndex = 0; attrIndex < attrs.length; attrIndex += 1) {
+                  var attr = attrs[attrIndex];
+                  var name = String(attr.name || '').toLowerCase();
+                  if (!name) continue;
+
+                  if (name.startsWith('on') || name === 'integrity' || name === 'nonce' || name === 'crossorigin' || name === 'referrerpolicy' || name === 'srcset') {
+                    el.removeAttribute(attr.name);
+                    continue;
+                  }
+
+                  var cleanedValue = normalizeSerializedText(attr.value || '');
+                  if (urlAttrs[name]) cleanedValue = cleanReplayUrl(cleanedValue);
+                  if (cleanedValue !== attr.value) {
+                    el.setAttribute(attr.name, cleanedValue);
+                  }
+                }
+              }
+
+              return '<!doctype html>' + doc.documentElement.outerHTML;
+            } catch (error) {
+              return html;
+            }
+          }
+
           function getEvent(index) {
             if (index < 0 || index >= events.length) return {};
             return asObject(events[index]);
@@ -1300,7 +1448,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             var e = asObject(event);
             var payload = asObject(e.payload);
             var nested = asObject(payload.payload);
-            return firstNonEmpty(e.domSnapshot, payload.domSnapshot, nested.domSnapshot);
+            return normalizeSerializedText(firstNonEmpty(e.domSnapshot, payload.domSnapshot, nested.domSnapshot));
           }
 
           function extractRunnerLine(event) {
@@ -1399,8 +1547,9 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             title.textContent = eventTitle + ' @ ' + safeIso(firstNonEmpty(event.ts, payload.ts, nested.ts));
 
             var domRef = findDomAtOrBefore(idx);
-            if (domRef && domRef.dom) {
-              frame.srcdoc = String(domRef.dom);
+            var sanitizedDom = domRef && domRef.dom ? sanitizeSnapshotHtml(domRef.dom) : '';
+            if (sanitizedDom) {
+              frame.srcdoc = String(sanitizedDom);
             } else {
               var payloadPreview = toPrettyString(payload && Object.keys(payload).length ? payload : event);
               frame.srcdoc = '<html><body style="font-family:system-ui, sans-serif; padding:16px; color:#111827;">' +
