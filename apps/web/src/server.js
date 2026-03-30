@@ -1382,6 +1382,24 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             return scoped;
           }
 
+          function isFailureEvent(event) {
+            var e = asObject(event);
+            var payload = asObject(e.payload);
+            var nested = asObject(payload.payload);
+            var type = firstNonEmpty(e.type, payload.type, nested.type).toLowerCase();
+            var detail = firstNonEmpty(e.detail, payload.detail, payload.message, nested.detail, nested.message).toLowerCase();
+            var status = firstNonEmpty(payload.status, nested.status).toLowerCase();
+            return type.indexOf('error') !== -1 || type.indexOf('failed') !== -1 || status === 'failed' || detail.indexOf(' failed') !== -1;
+          }
+
+          function findDefaultStepIndex(items) {
+            if (!Array.isArray(items) || !items.length) return 0;
+            for (var i = 0; i < items.length; i += 1) {
+              if (isFailureEvent(items[i])) return i;
+            }
+            return Math.max(items.length - 1, 0);
+          }
+
           function applySpecSelection(key, keepPosition) {
             var selectedKey = key || '__all__';
             activeSpecKey = selectedKey;
@@ -1393,7 +1411,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               var currentValue = Number(slider.value || 0);
               slider.value = String(Math.min(Math.max(currentValue, 0), Math.max(activeEvents.length - 1, 0)));
             } else {
-              slider.value = String(Math.max(activeEvents.length - 1, 0));
+              slider.value = String(findDefaultStepIndex(activeEvents));
             }
 
             if (specSelect.value !== selectedKey) {
@@ -1456,11 +1474,11 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               }
 
               var unescaped = text
-                .replace(/\\n/g, '\n')
-                .replace(/\\r/g, '\r')
-                .replace(/\\t/g, '\t')
-                .replace(/\\"/g, '"')
-                .replace(/\\'/g, "'");
+                .replace(/\\\\n/g, '\\n')
+                .replace(/\\\\r/g, '\\r')
+                .replace(/\\\\t/g, '\\t')
+                .replace(/\\\\"/g, '"')
+                .replace(/\\\\'/g, "'");
 
               if (unescaped !== text) {
                 text = unescaped;
@@ -1526,9 +1544,9 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           function sanitizeInlineStyle(value) {
             var text = String(value == null ? '' : value);
             return text
-              .replace(/url\(([^)]*)\)/gi, 'none')
+              .replace(/url\\(([^)]*)\\)/gi, 'none')
               .replace(/@import[^;]+;?/gi, '')
-              .replace(/expression\(([^)]*)\)/gi, '');
+              .replace(/expression\\(([^)]*)\\)/gi, '');
           }
 
           function sanitizeSnapshotHtml(value) {
@@ -1753,7 +1771,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               ? runnerData.map(function (line) {
                 var row = asObject(line);
                 return safeIso(row.ts) + ' | ' + firstNonEmpty(row.type, 'replay.event') + ' | ' + firstNonEmpty(row.title, 'n/a') + (row.detail ? ' | ' + row.detail : '');
-              }).join('\n')
+              }).join('\\n')
               : 'No runner log payload up to this step (' + (idx + 1) + ').';
 
             var allButtons = list.querySelectorAll('button[data-step]');
