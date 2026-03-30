@@ -443,23 +443,33 @@ export function setupTestHarbor(on, config, options = {}) {
     },
     'testharbor:replay' (entry) {
       if (entry && typeof entry === 'object') {
-        const specRunId = findSpecRunId(specRunIds, asTrimmedString(entry.specPath)) || null;
+        const fallbackSpecPath = asTrimmedString(entry.specPath);
+        const fallbackSpecRunId = findSpecRunId(specRunIds, fallbackSpecPath) || null;
         const events = Array.isArray(entry.events)
           ? entry.events
           : [entry];
+
+        let flushSpecRunId = fallbackSpecRunId;
         for (const event of events) {
+          const eventSpecPath = asTrimmedString(event?.specPath) || fallbackSpecPath || null;
+          const eventSpecRunId = findSpecRunId(specRunIds, eventSpecPath) || fallbackSpecRunId || null;
+          if (eventSpecRunId) flushSpecRunId = eventSpecRunId;
+
           pushReplayEvent({
             ...event,
+            ...(eventSpecPath ? { specPath: eventSpecPath } : {}),
+            ...(eventSpecRunId ? { specRunId: eventSpecRunId } : {}),
             title: event?.title || event?.name,
             ts: toIso(event?.ts || entry?.at || new Date())
           });
         }
+
         scheduleReplayFlush({
-          ...(specRunId ? { specRunId } : {})
+          ...(flushSpecRunId ? { specRunId: flushSpecRunId } : {})
         });
         if (replayQueue.length >= 50) {
           void flushReplayChunk({
-            ...(specRunId ? { specRunId } : {})
+            ...(flushSpecRunId ? { specRunId: flushSpecRunId } : {})
           }).catch(() => {});
         }
       }

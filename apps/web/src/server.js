@@ -1215,7 +1215,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             </div>
             <div class="panel">
               <div class="panel-header compact"><strong>Application under test</strong><small id="replay-event-title">${escapeHtml(initialReplayTitle)}</small></div>
-              <iframe id="replay-frame" sandbox="" referrerpolicy="no-referrer" srcdoc="${escapeHtml(initialDomSrcDoc)}" style="width:100%; min-height:420px; border:1px solid var(--border); border-radius:12px; background:#fff;"></iframe>
+              <iframe id="replay-frame" sandbox="allow-same-origin" referrerpolicy="no-referrer" srcdoc="${escapeHtml(initialDomSrcDoc)}" style="width:100%; min-height:420px; border:1px solid var(--border); border-radius:12px; background:#fff;"></iframe>
             </div>
           </div>
           <div class="grid two-up replay-grid">
@@ -1307,6 +1307,9 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             if (specRunId) return 'run:' + specRunId;
             var specPath = firstNonEmpty(e.specPath, payload.specPath, payload.spec_path, nested.specPath, nested.spec_path);
             if (specPath) return 'path:' + specPath;
+            var type = firstNonEmpty(e.type, payload.type, nested.type).toLowerCase();
+            var title = firstNonEmpty(e.title, payload.title, nested.title, payload.name, nested.name);
+            if (type.indexOf('replay.spec') === 0 && title) return 'path:' + title;
             return '__global__';
           }
 
@@ -1316,9 +1319,10 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             var nested = asObject(payload.payload);
             var specPath = firstNonEmpty(e.specPath, payload.specPath, payload.spec_path, nested.specPath, nested.spec_path);
             if (specPath) return specPath;
-            if (key && key.indexOf('run:') === 0) return 'spec-run ' + key.slice(4, 12);
+            var fallbackTitle = firstNonEmpty(e.title, payload.title, nested.title, payload.name, nested.name);
+            if (key && key.indexOf('run:') === 0) return fallbackTitle || ('spec-run ' + key.slice(4, 12));
             if (key && key.indexOf('path:') === 0) return key.slice(5);
-            return 'Run-level events';
+            return fallbackTitle || 'Run-level events';
           }
 
           function buildSpecOptions(items) {
@@ -1550,65 +1554,11 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           function sanitizeSnapshotHtml(value) {
             var html = normalizeSerializedText(value);
             if (!html) return '';
-
-            try {
-              var parser = new DOMParser();
-              var doc = parser.parseFromString(html, 'text/html');
-              if (!doc || !doc.documentElement) return html;
-
-              var blocked = doc.querySelectorAll('script, noscript, iframe, object, embed, base, meta[http-equiv="refresh"]');
-              for (var i = 0; i < blocked.length; i += 1) blocked[i].remove();
-
-              var styleNodes = doc.querySelectorAll('style');
-              for (var styleIdx = 0; styleIdx < styleNodes.length; styleIdx += 1) {
-                styleNodes[styleIdx].textContent = sanitizeInlineStyle(styleNodes[styleIdx].textContent || '');
-              }
-
-              var urlAttrs = {
-                src: true,
-                href: true,
-                action: true,
-                poster: true,
-                data: true,
-                'xlink:href': true
-              };
-
-              var all = doc.querySelectorAll('*');
-              for (var nodeIndex = 0; nodeIndex < all.length; nodeIndex += 1) {
-                var el = all[nodeIndex];
-                var attrs = Array.from(el.attributes || []);
-                for (var attrIndex = 0; attrIndex < attrs.length; attrIndex += 1) {
-                  var attr = attrs[attrIndex];
-                  var name = String(attr.name || '').toLowerCase();
-                  if (!name) continue;
-
-                  if (name.startsWith('on') || name === 'integrity' || name === 'nonce' || name === 'crossorigin' || name === 'referrerpolicy' || name === 'srcset') {
-                    el.removeAttribute(attr.name);
-                    continue;
-                  }
-
-                  var cleanedValue = unwrapQuotedLiteral(normalizeSerializedText(attr.value || ''));
-                  if (name === 'style') cleanedValue = sanitizeInlineStyle(cleanedValue);
-                  if (urlAttrs[name]) cleanedValue = cleanReplayUrl(cleanedValue);
-
-                  if (!cleanedValue && urlAttrs[name]) {
-                    el.removeAttribute(attr.name);
-                    continue;
-                  }
-
-                  if (cleanedValue !== attr.value) {
-                    el.setAttribute(attr.name, cleanedValue);
-                  }
-                }
-              }
-
-              return '<!doctype html>' + doc.documentElement.outerHTML;
-            } catch (error) {
-              return html;
-            }
+            return html;
           }
 
           function getEvent(index) {
+
 
             if (index < 0 || index >= activeEvents.length) return {};
             return asObject(activeEvents[index]);

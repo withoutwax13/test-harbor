@@ -92,7 +92,7 @@ export function installTestHarborReplayHooks(options = {}) {
   const captureDom = options.dom !== false;
 
   const queue = [];
-  const domSampleEvery = toNumber(options.domSampleEvery || Cypress.env('TESTHARBOR_REPLAY_DOM_SAMPLE_EVERY') || 8, 8);
+  const domSampleEvery = toNumber(options.domSampleEvery || Cypress.env('TESTHARBOR_REPLAY_DOM_SAMPLE_EVERY') || 1, 1);
   const maxRunnerMessageChars = toNumber(options.maxRunnerMessageChars || Cypress.env('TESTHARBOR_REPLAY_MAX_RUNNER_CHARS') || 1200, 1200);
   let commandSeq = 0;
   let lastDomHash = null;
