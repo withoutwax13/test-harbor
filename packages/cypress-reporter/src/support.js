@@ -34,6 +34,51 @@ function getSpecPath() {
   return Cypress?.spec?.relative || Cypress?.spec?.name || null;
 }
 
+
+function toNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function simpleHash(value) {
+  const text = String(value || '');
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(i);
+    hash |= 0;
+  }
+  return String(hash);
+}
+
+function getCurrentUrl() {
+  try {
+    const win = Cypress?.state?.('window');
+    return win?.location?.href || null;
+  } catch {
+    return null;
+  }
+}
+
+function getCurrentDomSnapshot(maxChars = 120000) {
+  try {
+    const doc = Cypress?.state?.('document');
+    const html = doc?.documentElement?.outerHTML || '';
+    return truncateText(html, maxChars);
+  } catch {
+    return '';
+  }
+}
+
+function shouldCaptureDomForCommand(name = '', seq = 0, sampleEvery = 8) {
+  const command = String(name || '').toLowerCase();
+  const domCommands = new Set([
+    'visit', 'click', 'dblclick', 'rightclick', 'type', 'clear', 'select', 'check', 'uncheck',
+    'submit', 'reload', 'go', 'contains', 'get', 'find', 'within', 'trigger', 'focus', 'blur',
+    'scrollto', 'scrollintoview', 'screenshot', 'wait'
+  ]);
+  return domCommands.has(command) || (seq % Math.max(1, sampleEvery) === 0);
+}
+
 export function installTestHarborReplayHooks(options = {}) {
   if (globalThis.__TESTHARBOR_REPLAY_HOOKS_INSTALLED__) return;
   globalThis.__TESTHARBOR_REPLAY_HOOKS_INSTALLED__ = true;
@@ -47,6 +92,10 @@ export function installTestHarborReplayHooks(options = {}) {
   const captureDom = options.dom !== false;
 
   const queue = [];
+  const domSampleEvery = toNumber(options.domSampleEvery || Cypress.env('TESTHARBOR_REPLAY_DOM_SAMPLE_EVERY') || 8, 8);
+  const maxRunnerMessageChars = toNumber(options.maxRunnerMessageChars || Cypress.env('TESTHARBOR_REPLAY_MAX_RUNNER_CHARS') || 1200, 1200);
+  let commandSeq = 0;
+  let lastDomHash = null;
 
   function enqueue(event = {}) {
     if (!event || typeof event !== 'object') return;
@@ -87,20 +136,51 @@ export function installTestHarborReplayHooks(options = {}) {
       );
   }
 
+
   Cypress.on('command:end', (command) => {
     const attributes = command?.attributes || {};
     const name = command?.name || attributes.name || 'command';
     const message = attributes.message || null;
+    commandSeq += 1;
+
+    let consoleProps = null;
+    try {
+      if (typeof command?.consoleProps === 'function') {
+        consoleProps = serializeValue(command.consoleProps(), maxRunnerMessageChars);
+      } else if (attributes?.consoleProps) {
+        consoleProps = serializeValue(attributes.consoleProps, maxRunnerMessageChars);
+      }
+    } catch {
+      consoleProps = null;
+    }
+
+    let domSnapshot = null;
+    if (captureDom && shouldCaptureDomForCommand(name, commandSeq, domSampleEvery)) {
+      const candidate = getCurrentDomSnapshot(maxDomChars);
+      if (candidate) {
+        const hash = simpleHash(candidate);
+        if (hash !== lastDomHash) {
+          domSnapshot = candidate;
+          lastDomHash = hash;
+        }
+      }
+    }
+
     enqueue({
       type: 'replay.command',
       title: name,
       detail: message ? truncateText(message, maxDetailChars) : `Command ${name}`,
       command: name,
+      domSnapshot,
       payload: {
         name,
         message: message ? truncateText(message, maxDetailChars) : null,
         state: attributes.state || command?.state || null,
-        endedAt: toIso()
+        chainerId: attributes.chainerId || null,
+        wallClockStartedAt: attributes.wallClockStartedAt || null,
+        endedAt: toIso(),
+        url: getCurrentUrl(),
+        consoleProps
       }
     });
   });
@@ -223,20 +303,118 @@ export function installTestHarborReplayHooks(options = {}) {
         return originalSend.apply(this, args);
       };
     }
+
+    if (captureConsole && typeof win.addEventListener === 'function') {
+      win.addEventListener('error', (evt) => {
+        const msg = evt?.message || evt?.error?.message || 'Unknown window error';
+        enqueue({
+          type: 'replay.js.error',
+          title: 'window.error',
+          detail: truncateText(msg, maxDetailChars),
+          console: [{
+            level: 'error',
+            source: 'window.error',
+            message: truncateText(msg, maxDetailChars),
+            url: evt?.filename || null,
+            line: evt?.lineno || null,
+            column: evt?.colno || null
+          }],
+          payload: {
+            url: getCurrentUrl(),
+            filename: evt?.filename || null,
+            line: evt?.lineno || null,
+            column: evt?.colno || null
+          }
+        });
+      });
+
+      win.addEventListener('unhandledrejection', (evt) => {
+        const reason = evt?.reason;
+        const message = typeof reason === 'string'
+          ? reason
+          : (reason?.message || truncateText(JSON.stringify(reason || 'unknown'), maxDetailChars));
+        enqueue({
+          type: 'replay.js.unhandledrejection',
+          title: 'unhandledrejection',
+          detail: truncateText(message, maxDetailChars),
+          console: [{ level: 'error', source: 'unhandledrejection', message: truncateText(message, maxDetailChars) }],
+          payload: {
+            url: getCurrentUrl(),
+            reason: serializeValue(reason, maxDetailChars)
+          }
+        });
+      });
+    }
   });
 
+
+  if (typeof beforeEach === 'function') {
+    beforeEach(function () {
+      const test = this?.currentTest;
+      const titlePath = typeof test?.titlePath === 'function' ? test.titlePath() : [];
+      enqueue({
+        type: 'replay.test.started',
+        title: test?.title || 'test',
+        detail: titlePath.length ? titlePath.join(' > ') : 'Test started',
+        payload: {
+          testTitle: test?.title || null,
+          fullTitle: typeof test?.fullTitle === 'function' ? test.fullTitle() : null,
+          specPath: getSpecPath(),
+          startedAt: toIso(),
+          url: getCurrentUrl()
+        }
+      });
+    });
+  }
+
   if (typeof afterEach === 'function') {
-    afterEach(() => {
-      if (!captureDom) return flushQueuedEvents();
+    afterEach(function () {
+      const test = this?.currentTest;
+      const titlePath = typeof test?.titlePath === 'function' ? test.titlePath() : [];
+      const finishEvent = {
+        type: 'replay.test.finished',
+        title: test?.title || 'test',
+        detail: `Test ${(test?.state || 'unknown').toUpperCase()}`,
+        payload: {
+          testTitle: test?.title || null,
+          fullTitle: typeof test?.fullTitle === 'function' ? test.fullTitle() : null,
+          state: test?.state || null,
+          duration: test?.duration ?? null,
+          specPath: getSpecPath(),
+          endedAt: toIso(),
+          url: getCurrentUrl(),
+          titlePath,
+          err: serializeValue(test?.err || null, maxRunnerMessageChars)
+        }
+      };
+
+      const captureAndFlush = () => {
+        enqueue(finishEvent);
+        return flushQueuedEvents();
+      };
+
+      if (!captureDom) return captureAndFlush();
       return cy.document({ log: false }).then((doc) => {
         const domSnapshot = truncateText(doc?.documentElement?.outerHTML || '', maxDomChars);
-        enqueue({
-          type: 'replay.dom.snapshot',
-          title: 'DOM snapshot',
-          detail: domSnapshot ? `Captured ${domSnapshot.length} chars` : 'DOM unavailable',
-          domSnapshot: domSnapshot || null
-        });
-      }).then(() => flushQueuedEvents());
+        if (domSnapshot) {
+          const hash = simpleHash(domSnapshot);
+          if (hash !== lastDomHash) {
+            lastDomHash = hash;
+            enqueue({
+              type: 'replay.dom.snapshot',
+              title: test?.title || 'DOM snapshot',
+              detail: `Captured ${domSnapshot.length} chars`,
+              domSnapshot,
+              payload: {
+                testTitle: test?.title || null,
+                state: test?.state || null,
+                url: getCurrentUrl(),
+                capturedAt: toIso()
+              }
+            });
+          }
+        }
+      }).then(() => captureAndFlush());
     });
   }
 
