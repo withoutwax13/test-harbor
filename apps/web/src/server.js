@@ -1112,7 +1112,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             if (typeof value === 'string') return value;
             try {
               return JSON.stringify(value, null, 2);
-            } catch {
+            } catch (error) {
               return String(value);
             }
           }
@@ -1154,12 +1154,14 @@ function renderRunReplayPage(shell, replayDetail, runId) {
                 '</button>';
             }).join('');
 
-            list.querySelectorAll('button[data-step]').forEach(function (button) {
+            var stepButtons = list.querySelectorAll('button[data-step]');
+            for (var i = 0; i < stepButtons.length; i += 1) {
+              var button = stepButtons[i];
               button.addEventListener('click', function () {
-                slider.value = button.dataset.step;
+                slider.value = this.dataset.step;
                 renderCurrent();
               });
-            });
+            }
           }
 
           function renderCurrent() {
@@ -1211,15 +1213,28 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               ? JSON.stringify(networkData, null, 2)
               : 'No network payload for this step.\n\nType: ' + eventType + '\nTitle: ' + eventTitle + '\nDetail: ' + (eventDetail || 'n/a');
 
-            list.querySelectorAll('button[data-step]').forEach(function (button) {
-              var isActive = Number(button.dataset.step) === idx;
-              button.classList.toggle('replay-step-active', isActive);
-            });
+            var allButtons = list.querySelectorAll('button[data-step]');
+            for (var j = 0; j < allButtons.length; j += 1) {
+              var activeButton = allButtons[j];
+              var isActive = Number(activeButton.dataset.step) === idx;
+              if (isActive) {
+                activeButton.classList.add('replay-step-active');
+              } else {
+                activeButton.classList.remove('replay-step-active');
+              }
+            }
           }
 
-          renderList();
-          slider.addEventListener('input', renderCurrent);
-          renderCurrent();
+          try {
+            renderList();
+            slider.addEventListener('input', renderCurrent);
+            renderCurrent();
+          } catch (error) {
+            var errMsg = error && error.message ? error.message : String(error);
+            consoleNode.textContent = 'Replay render error: ' + errMsg;
+            networkNode.textContent = 'Replay render error: ' + errMsg;
+            title.textContent = 'Replay render error';
+          }
         })();
       </script>`
   });
