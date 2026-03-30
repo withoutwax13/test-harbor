@@ -1015,6 +1015,23 @@ function renderRunReplayPage(shell, replayDetail, runId) {
   });
 
   const replayJson = JSON.stringify(normalized).replaceAll('<', '\u003c');
+  const initialEvent = normalized[0] || null;
+  const initialReplayTitle = initialEvent
+    ? `${initialEvent.type || 'replay.event'} @ ${formatDate(initialEvent.ts)}`
+    : '';
+  const initialConsoleText = initialEvent && Array.isArray(initialEvent.console) && initialEvent.console.length
+    ? JSON.stringify(initialEvent.console, null, 2)
+    : 'No console payload for this step.';
+  const initialNetworkText = initialEvent && Array.isArray(initialEvent.network) && initialEvent.network.length
+    ? JSON.stringify(initialEvent.network, null, 2)
+    : 'No network payload for this step.';
+  const initialStepListHtml = normalized.map((event, idx) => {
+    const typeLabel = event?.type || 'replay.event';
+    const titleLabel = event?.title || event?.command || event?.detail || '';
+    const rowText = `${idx + 1}. ${typeLabel}${titleLabel ? ` · ${String(titleLabel).slice(0, 90)}` : ''} · ${formatDate(event?.ts)}`;
+    const activeClass = idx === 0 ? ' replay-step-active' : '';
+    return `<button type="button" data-step="${idx}" class="button button-secondary replay-step-button${activeClass}" style="justify-content:flex-start; text-align:left; width:100%;">${escapeHtml(rowText)}</button>`;
+  }).join('');
 
   return renderLayout({
     title: `Replay ${runId.slice(0, 8)}`,
@@ -1044,23 +1061,23 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           <input id="replay-step" type="range" min="0" max="${Math.max(0, normalized.length - 1)}" value="0" />
           <div class="grid two-up">
             <div class="panel">
-              <div class="panel-header compact"><strong>Steps</strong><small id="replay-step-meta">0 / ${normalized.length}</small></div>
-              <div id="replay-step-list" class="stack" style="max-height: 320px; overflow: auto;"></div>
+              <div class="panel-header compact"><strong>Steps</strong><small id="replay-step-meta">1 / ${normalized.length}</small></div>
+              <div id="replay-step-list" class="stack" style="max-height: 320px; overflow: auto;">${initialStepListHtml}</div>
             </div>
             <div class="panel">
-              <div class="panel-header compact"><strong>Reconstructed DOM</strong><small id="replay-event-title"></small></div>
+              <div class="panel-header compact"><strong>Reconstructed DOM</strong><small id="replay-event-title">${escapeHtml(initialReplayTitle)}</small></div>
               <iframe id="replay-frame" style="width:100%; min-height:380px; border:1px solid var(--border); border-radius:12px;"></iframe>
             </div>
           </div>
           <div class="grid two-up">
-            <div class="panel"><div class="panel-header compact"><strong>Console</strong></div><pre id="replay-console" class="code-block"></pre></div>
-            <div class="panel"><div class="panel-header compact"><strong>Network</strong></div><pre id="replay-network" class="code-block"></pre></div>
+            <div class="panel"><div class="panel-header compact"><strong>Console</strong></div><pre id="replay-console" class="code-block">${escapeHtml(initialConsoleText)}</pre></div>
+            <div class="panel"><div class="panel-header compact"><strong>Network</strong></div><pre id="replay-network" class="code-block">${escapeHtml(initialNetworkText)}</pre></div>
           </div>
         </div>` : '<div class="empty-state"><h3>No replay events found</h3><p>Enable replay hooks in your Cypress support file to capture DOM/network/console data, then rerun tests.</p></div>'}
       </section>
       <script id="replay-data" type="application/json">${replayJson}</script>
       <script>
-        (() => {
+        (function () {
           var dataNode = document.getElementById('replay-data');
           if (!dataNode) return;
 
