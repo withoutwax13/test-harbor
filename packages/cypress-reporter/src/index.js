@@ -310,6 +310,9 @@ export function setupTestHarbor(on, config, options = {}) {
       title: asTrimmedString(event.title || event.name || event.command) || null,
       detail: detailFallback,
       command: event.command || payloadObj?.command || null,
+      specRunId: asTrimmedString(event.specRunId || payloadObj?.specRunId || payloadObj?.spec_run_id) || null,
+      specPath: asTrimmedString(event.specPath || payloadObj?.specPath || payloadObj?.spec_path) || null,
+      testResultId: asTrimmedString(event.testResultId || payloadObj?.testResultId || payloadObj?.test_result_id) || null,
       payload: payloadObj || null,
       console: Array.isArray(event.console)
         ? event.console

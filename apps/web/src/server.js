@@ -1210,11 +1210,11 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           <input id="replay-step" type="range" min="0" max="${Math.max(0, normalized.length - 1)}" value="${initialIndex}" />
           <div class="grid two-up replay-grid">
             <div class="panel">
-              <div class="panel-header compact"><strong>Steps</strong><small id="replay-step-meta">${initialIndex + 1} / ${normalized.length}</small></div>
+              <div class="panel-header compact"><strong>Command Log</strong><small id="replay-step-meta">${initialIndex + 1} / ${normalized.length}</small></div>
               <div id="replay-step-list" class="stack" style="max-height: 360px; overflow: auto;">${initialStepListHtml}</div>
             </div>
             <div class="panel">
-              <div class="panel-header compact"><strong>Reconstructed DOM</strong><small id="replay-event-title">${escapeHtml(initialReplayTitle)}</small></div>
+              <div class="panel-header compact"><strong>Application under test</strong><small id="replay-event-title">${escapeHtml(initialReplayTitle)}</small></div>
               <iframe id="replay-frame" sandbox="" referrerpolicy="no-referrer" srcdoc="${escapeHtml(initialDomSrcDoc)}" style="width:100%; min-height:420px; border:1px solid var(--border); border-radius:12px; background:#fff;"></iframe>
             </div>
           </div>
@@ -1474,11 +1474,11 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               }
 
               var unescaped = text
-                .replace(/\\\\n/g, '\\n')
-                .replace(/\\\\r/g, '\\r')
-                .replace(/\\\\t/g, '\\t')
-                .replace(/\\\\"/g, '"')
-                .replace(/\\\\'/g, "'");
+                .split('\\n').join('\n')
+                .split('\\r').join('\r')
+                .split('\\t').join('\t')
+                .split('\\"').join('"')
+                .split("\\'").join("'");
 
               if (unescaped !== text) {
                 text = unescaped;
@@ -1526,7 +1526,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               return 'about:blank';
             }
             if (lower.startsWith('http://') || lower.startsWith('https://') || lower.startsWith('//') || lower.startsWith('/')) {
-              return '';
+              return raw;
             }
             return raw;
           }
@@ -1544,9 +1544,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           function sanitizeInlineStyle(value) {
             var text = String(value == null ? '' : value);
             return text
-              .replace(/url\\(([^)]*)\\)/gi, 'none')
-              .replace(/@import[^;]+;?/gi, '')
-              .replace(/expression\\(([^)]*)\\)/gi, '');
+              .replace(/expression[(]([^)]*)[)]/gi, '');
           }
 
           function sanitizeSnapshotHtml(value) {
@@ -1558,7 +1556,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               var doc = parser.parseFromString(html, 'text/html');
               if (!doc || !doc.documentElement) return html;
 
-              var blocked = doc.querySelectorAll('script, noscript, iframe, object, embed, base, meta[http-equiv="refresh"], link');
+              var blocked = doc.querySelectorAll('script, noscript, iframe, object, embed, base, meta[http-equiv="refresh"]');
               for (var i = 0; i < blocked.length; i += 1) blocked[i].remove();
 
               var styleNodes = doc.querySelectorAll('style');
