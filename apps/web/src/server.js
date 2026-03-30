@@ -1014,6 +1014,10 @@ function renderRunReplayPage(shell, replayDetail, runId) {
       title: firstText(payload.title, payload.name, nestedPayload.title, nestedPayload.name) || null,
       detail: firstText(payload.detail, payload.message, nestedPayload.detail, nestedPayload.message) || null,
       command: firstText(payload.command, nestedPayload.command) || null,
+      specRunId: firstText(row?.spec_run_id, payload.specRunId, nestedPayload.specRunId) || null,
+      specPath: firstText(payload.specPath, nestedPayload.specPath) || null,
+      testResultId: firstText(row?.test_result_id, payload.testResultId, nestedPayload.testResultId) || null,
+      testTitle: firstText(payload.testTitle, nestedPayload.testTitle) || null,
       console: consoleItems,
       network: networkItems,
       domSnapshot,
@@ -1155,6 +1159,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
   const consoleEntryCount = normalized.reduce((n, event) => n + extractConsole(event).length, 0);
   const networkEntryCount = normalized.reduce((n, event) => n + extractNetwork(event).length, 0);
   const domEntryCount = normalized.reduce((n, event) => n + (extractDom(event) ? 1 : 0), 0);
+  const replaySpecCount = new Set(normalized.map((event) => firstText(event?.specRunId, event?.specPath)).filter(Boolean)).size;
 
   return renderLayout({
     title: `Replay ${runId.slice(0, 8)}`,
@@ -1168,6 +1173,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
         </div>
         <div class="hero-metrics">
           ${summaryCard('Captured events', String(normalized.length), normalized.length ? `From ${formatDate(normalized[0]?.ts)} to ${formatDate(normalized.at(-1)?.ts)}` : 'No replay events yet')}
+          ${summaryCard('Spec attempts', String(replaySpecCount), replaySpecCount ? 'Selectable in replay toolbar' : 'No spec-level metadata yet')}
           ${summaryCard('Console entries', String(consoleEntryCount), 'Cumulative up to selected step')}
           ${summaryCard('Network entries', String(networkEntryCount), 'Cumulative up to selected step')}
           ${summaryCard('DOM snapshots', String(domEntryCount), 'Nearest snapshot rendered for each step')}
@@ -1177,11 +1183,30 @@ function renderRunReplayPage(shell, replayDetail, runId) {
         <div class="panel-header">
           <div>
             <h2>Time travel</h2>
-            <p>Use slider or click any step. Panels show cumulative state up to that moment.</p>
+            <p>Pick a spec/attempt, then scrub or play the timeline. Panels show Cypress-style command context, DOM, console, network, and runner logs for that selection.</p>
           </div>
           <a class="button button-secondary" href="/app/runs/${escapeHtml(runId)}">Back to run detail</a>
         </div>
         ${normalized.length ? `<div class="stack">
+          <div class="grid three-up replay-toolbar">
+            <label>Spec / attempt
+              <select id="replay-spec-select"></select>
+            </label>
+            <label>Playback speed
+              <select id="replay-speed">
+                <option value="0.5">0.5x</option>
+                <option value="1" selected>1x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2">2x</option>
+                <option value="3">3x</option>
+              </select>
+            </label>
+            <div class="row-actions" style="align-items:flex-end; justify-content:flex-end;">
+              <button type="button" class="button button-secondary" id="replay-play-pause">Play</button>
+              <button type="button" class="button button-secondary" id="replay-step-prev">Prev</button>
+              <button type="button" class="button button-secondary" id="replay-step-next">Next</button>
+            </div>
+          </div>
           <input id="replay-step" type="range" min="0" max="${Math.max(0, normalized.length - 1)}" value="${initialIndex}" />
           <div class="grid two-up replay-grid">
             <div class="panel">
@@ -1233,7 +1258,12 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           var consoleNode = document.getElementById('replay-console');
           var networkNode = document.getElementById('replay-network');
           var runnerNode = document.getElementById('replay-runner-log');
-          if (!slider || !list || !frame || !meta || !title || !consoleNode || !networkNode || !runnerNode) return;
+          var specSelect = document.getElementById('replay-spec-select');
+          var speedSelect = document.getElementById('replay-speed');
+          var playPauseButton = document.getElementById('replay-play-pause');
+          var prevButton = document.getElementById('replay-step-prev');
+          var nextButton = document.getElementById('replay-step-next');
+          if (!slider || !list || !frame || !meta || !title || !consoleNode || !networkNode || !runnerNode || !specSelect || !speedSelect || !playPauseButton || !prevButton || !nextButton) return;
 
           function asObject(value) {
             if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -1254,6 +1284,124 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               if (asString) return asString;
             }
             return '';
+          }
+
+          var allEvents = Array.isArray(events) ? events : [];
+          var activeEvents = allEvents.slice();
+          var activeSpecKey = '__all__';
+          var playbackTimer = null;
+
+          function stopPlayback() {
+            if (playbackTimer) {
+              clearInterval(playbackTimer);
+              playbackTimer = null;
+            }
+            playPauseButton.textContent = 'Play';
+          }
+
+          function resolveSpecKey(event) {
+            var e = asObject(event);
+            var payload = asObject(e.payload);
+            var nested = asObject(payload.payload);
+            var specRunId = firstNonEmpty(e.specRunId, payload.specRunId, payload.spec_run_id, nested.specRunId, nested.spec_run_id);
+            if (specRunId) return 'run:' + specRunId;
+            var specPath = firstNonEmpty(e.specPath, payload.specPath, payload.spec_path, nested.specPath, nested.spec_path);
+            if (specPath) return 'path:' + specPath;
+            return '__global__';
+          }
+
+          function resolveSpecLabel(event, key) {
+            var e = asObject(event);
+            var payload = asObject(e.payload);
+            var nested = asObject(payload.payload);
+            var specPath = firstNonEmpty(e.specPath, payload.specPath, payload.spec_path, nested.specPath, nested.spec_path);
+            if (specPath) return specPath;
+            if (key && key.indexOf('run:') === 0) return 'spec-run ' + key.slice(4, 12);
+            if (key && key.indexOf('path:') === 0) return key.slice(5);
+            return 'Run-level events';
+          }
+
+          function buildSpecOptions(items) {
+            var groups = {};
+            for (var i = 0; i < items.length; i += 1) {
+              var event = asObject(items[i]);
+              var key = resolveSpecKey(event);
+              if (!groups[key]) {
+                groups[key] = {
+                  key: key,
+                  label: resolveSpecLabel(event, key),
+                  events: []
+                };
+              }
+              groups[key].events.push(event);
+            }
+
+            var out = [];
+            out.push({ key: '__all__', label: 'All specs / attempts', events: items.slice() });
+
+            var keys = Object.keys(groups).filter(function (key) { return key !== '__global__'; });
+            keys.sort(function (a, b) {
+              var aCount = groups[a].events.length;
+              var bCount = groups[b].events.length;
+              if (aCount !== bCount) return bCount - aCount;
+              return groups[a].label.localeCompare(groups[b].label);
+            });
+
+            for (var idx = 0; idx < keys.length; idx += 1) {
+              var key = keys[idx];
+              var group = groups[key];
+              out.push({
+                key: key,
+                label: group.label + ' (' + group.events.length + ' events)',
+                events: group.events.slice()
+              });
+            }
+
+            return {
+              options: out,
+              globalEvents: groups.__global__ ? groups.__global__.events.slice() : []
+            };
+          }
+
+          var specModel = buildSpecOptions(allEvents);
+
+          function hydrateSpecSelector() {
+            specSelect.innerHTML = specModel.options.map(function (option) {
+              return '<option value="' + escapeHtmlInline(option.key) + '">' + escapeHtmlInline(option.label) + '</option>';
+            }).join('');
+          }
+
+          function eventsForSpec(key) {
+            if (!key || key === '__all__') return allEvents.slice();
+            var scoped = [];
+            for (var i = 0; i < allEvents.length; i += 1) {
+              var event = asObject(allEvents[i]);
+              var eventKey = resolveSpecKey(event);
+              if (eventKey === key || eventKey === '__global__') scoped.push(event);
+            }
+            return scoped;
+          }
+
+          function applySpecSelection(key, keepPosition) {
+            var selectedKey = key || '__all__';
+            activeSpecKey = selectedKey;
+            activeEvents = eventsForSpec(selectedKey);
+            if (!activeEvents.length) activeEvents = allEvents.slice();
+
+            slider.max = String(Math.max(0, activeEvents.length - 1));
+            if (keepPosition) {
+              var currentValue = Number(slider.value || 0);
+              slider.value = String(Math.min(Math.max(currentValue, 0), Math.max(activeEvents.length - 1, 0)));
+            } else {
+              slider.value = String(Math.max(activeEvents.length - 1, 0));
+            }
+
+            if (specSelect.value !== selectedKey) {
+              specSelect.value = selectedKey;
+            }
+            stopPlayback();
+            renderList();
+            renderCurrent();
           }
 
           function escapeHtmlInline(value) {
@@ -1308,9 +1456,9 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               }
 
               var unescaped = text
-                .replace(/\\n/g, '\\n')
-                .replace(/\\r/g, '\\r')
-                .replace(/\\t/g, '\\t')
+                .replace(/\\n/g, '\n')
+                .replace(/\\r/g, '\r')
+                .replace(/\\t/g, '\t')
                 .replace(/\\"/g, '"')
                 .replace(/\\'/g, "'");
 
@@ -1340,9 +1488,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
 
             if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
               var maybe = text.slice(1, -1).trim();
-              if (maybe.startsWith('<') || maybe.startsWith('{') || maybe.startsWith('http') || maybe.startsWith('/')) {
-                text = maybe;
-              }
+              if (maybe) text = maybe;
             }
 
             return text;
@@ -1352,22 +1498,37 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             var raw = normalizeSerializedText(value).trim();
             if (!raw) return '';
 
-            if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
-              raw = raw.slice(1, -1).trim();
-            }
-
+            raw = raw.replace(/^["']+|["']+$/g, '').trim();
             var lower = raw.toLowerCase();
             if (!lower) return '';
             if (lower.startsWith('data:image/') || lower.startsWith('data:video/') || lower.startsWith('blob:') || lower.startsWith('#')) {
               return raw;
             }
-            if (lower.startsWith('javascript:') || lower.startsWith('data:text/html')) {
+            if (lower.startsWith('javascript:') || lower.startsWith('vbscript:') || lower.startsWith('data:text/html')) {
               return 'about:blank';
             }
             if (lower.startsWith('http://') || lower.startsWith('https://') || lower.startsWith('//') || lower.startsWith('/')) {
-              return 'about:blank#blocked';
+              return '';
             }
             return raw;
+          }
+
+          function unwrapQuotedLiteral(value) {
+            var text = String(value == null ? '' : value).trim();
+            for (var i = 0; i < 3; i += 1) {
+              if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+                text = text.slice(1, -1).trim();
+              }
+            }
+            return text;
+          }
+
+          function sanitizeInlineStyle(value) {
+            var text = String(value == null ? '' : value);
+            return text
+              .replace(/url\(([^)]*)\)/gi, 'none')
+              .replace(/@import[^;]+;?/gi, '')
+              .replace(/expression\(([^)]*)\)/gi, '');
           }
 
           function sanitizeSnapshotHtml(value) {
@@ -1379,8 +1540,13 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               var doc = parser.parseFromString(html, 'text/html');
               if (!doc || !doc.documentElement) return html;
 
-              var blocked = doc.querySelectorAll('script, noscript, iframe, object, embed, base, meta[http-equiv="refresh"]');
+              var blocked = doc.querySelectorAll('script, noscript, iframe, object, embed, base, meta[http-equiv="refresh"], link');
               for (var i = 0; i < blocked.length; i += 1) blocked[i].remove();
+
+              var styleNodes = doc.querySelectorAll('style');
+              for (var styleIdx = 0; styleIdx < styleNodes.length; styleIdx += 1) {
+                styleNodes[styleIdx].textContent = sanitizeInlineStyle(styleNodes[styleIdx].textContent || '');
+              }
 
               var urlAttrs = {
                 src: true,
@@ -1405,8 +1571,15 @@ function renderRunReplayPage(shell, replayDetail, runId) {
                     continue;
                   }
 
-                  var cleanedValue = normalizeSerializedText(attr.value || '');
+                  var cleanedValue = unwrapQuotedLiteral(normalizeSerializedText(attr.value || ''));
+                  if (name === 'style') cleanedValue = sanitizeInlineStyle(cleanedValue);
                   if (urlAttrs[name]) cleanedValue = cleanReplayUrl(cleanedValue);
+
+                  if (!cleanedValue && urlAttrs[name]) {
+                    el.removeAttribute(attr.name);
+                    continue;
+                  }
+
                   if (cleanedValue !== attr.value) {
                     el.setAttribute(attr.name, cleanedValue);
                   }
@@ -1420,8 +1593,9 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           }
 
           function getEvent(index) {
-            if (index < 0 || index >= events.length) return {};
-            return asObject(events[index]);
+
+            if (index < 0 || index >= activeEvents.length) return {};
+            return asObject(activeEvents[index]);
           }
 
           function extractConsole(event) {
@@ -1476,9 +1650,9 @@ function renderRunReplayPage(shell, replayDetail, runId) {
 
           function collectUpTo(index, extractor, limit) {
             var out = [];
-            var safeIndex = Math.min(Math.max(Number(index) || 0, 0), Math.max(events.length - 1, 0));
-            for (var i = 0; i <= safeIndex && i < events.length; i += 1) {
-              var value = extractor(events[i]);
+            var safeIndex = Math.min(Math.max(Number(index) || 0, 0), Math.max(activeEvents.length - 1, 0));
+            for (var i = 0; i <= safeIndex && i < activeEvents.length; i += 1) {
+              var value = extractor(activeEvents[i]);
               if (!value) continue;
               if (Array.isArray(value)) {
                 for (var j = 0; j < value.length; j += 1) out.push(value[j]);
@@ -1492,16 +1666,16 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           }
 
           function findDomAtOrBefore(index) {
-            var safeIndex = Math.min(Math.max(Number(index) || 0, 0), Math.max(events.length - 1, 0));
+            var safeIndex = Math.min(Math.max(Number(index) || 0, 0), Math.max(activeEvents.length - 1, 0));
             for (var i = safeIndex; i >= 0; i -= 1) {
-              var dom = extractDom(events[i]);
+              var dom = extractDom(activeEvents[i]);
               if (dom) return { dom: dom, index: i };
             }
             return null;
           }
 
           function renderList() {
-            list.innerHTML = events.map(function (event, idx) {
+            list.innerHTML = activeEvents.map(function (event, idx) {
               var e = asObject(event);
               var payload = asObject(e.payload);
               var nested = asObject(payload.payload);
@@ -1532,7 +1706,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           function renderCurrent() {
             var rawIdx = Number(slider.value || 0);
             var idx = Number.isFinite(rawIdx)
-              ? Math.min(Math.max(rawIdx, 0), Math.max(events.length - 1, 0))
+              ? Math.min(Math.max(rawIdx, 0), Math.max(activeEvents.length - 1, 0))
               : 0;
 
             var event = getEvent(idx);
@@ -1543,7 +1717,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             var eventTitle = firstNonEmpty(event.title, event.command, payload.name, payload.command, nested.name, nested.command, eventType);
             var eventDetail = firstNonEmpty(event.detail, payload.message, nested.message, payload.detail, nested.detail, 'No detail captured');
 
-            meta.textContent = (events.length ? idx + 1 : 0) + ' / ' + events.length;
+            meta.textContent = (activeEvents.length ? idx + 1 : 0) + ' / ' + activeEvents.length;
             title.textContent = eventTitle + ' @ ' + safeIso(firstNonEmpty(event.ts, payload.ts, nested.ts));
 
             var domRef = findDomAtOrBefore(idx);
@@ -1592,9 +1766,63 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           }
 
           try {
-            renderList();
-            slider.addEventListener('input', renderCurrent);
-            renderCurrent();
+            hydrateSpecSelector();
+
+            var defaultSpecKey = specModel.options.length > 1
+              ? specModel.options[1].key
+              : '__all__';
+
+            specSelect.addEventListener('change', function () {
+              applySpecSelection(specSelect.value || '__all__', false);
+            });
+
+            slider.addEventListener('input', function () {
+              renderCurrent();
+            });
+
+            prevButton.addEventListener('click', function () {
+              stopPlayback();
+              var current = Number(slider.value || 0);
+              slider.value = String(Math.max(current - 1, 0));
+              renderCurrent();
+            });
+
+            nextButton.addEventListener('click', function () {
+              stopPlayback();
+              var current = Number(slider.value || 0);
+              slider.value = String(Math.min(current + 1, Math.max(activeEvents.length - 1, 0)));
+              renderCurrent();
+            });
+
+            playPauseButton.addEventListener('click', function () {
+              if (playbackTimer) {
+                stopPlayback();
+                return;
+              }
+
+              var speed = Math.max(Number(speedSelect.value || 1), 0.25);
+              var intervalMs = Math.max(80, Math.floor(380 / speed));
+              playPauseButton.textContent = 'Pause';
+
+              playbackTimer = setInterval(function () {
+                var current = Number(slider.value || 0);
+                var max = Math.max(activeEvents.length - 1, 0);
+                if (current >= max) {
+                  stopPlayback();
+                  return;
+                }
+                slider.value = String(current + 1);
+                renderCurrent();
+              }, intervalMs);
+            });
+
+            speedSelect.addEventListener('change', function () {
+              if (playbackTimer) {
+                stopPlayback();
+              }
+            });
+
+            applySpecSelection(defaultSpecKey, false);
           } catch (error) {
             var errMsg = error && error.message ? error.message : String(error);
             consoleNode.textContent = 'Replay render error: ' + errMsg;
