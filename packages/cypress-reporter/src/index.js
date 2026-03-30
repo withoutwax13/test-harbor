@@ -297,16 +297,31 @@ export function setupTestHarbor(on, config, options = {}) {
 
   function pushReplayEvent(event = {}) {
     if (!event || typeof event !== 'object') return null;
+    const payloadObj = event.payload && typeof event.payload === 'object' ? event.payload : null;
+    const detailFallback = asTrimmedString(event.detail)
+      || asTrimmedString(event.message)
+      || asTrimmedString(payloadObj?.detail)
+      || asTrimmedString(payloadObj?.message)
+      || (payloadObj ? asTrimmedString(JSON.stringify(payloadObj).slice(0, 1200)) : null);
+
     const enriched = {
       type: asTrimmedString(event.type) || 'replay.event',
       ts: toIso(event.ts || event.at || new Date()),
-      title: asTrimmedString(event.title || event.name) || null,
-      detail: event.detail || null,
-      command: event.command || null,
-      payload: event.payload || null,
-      console: Array.isArray(event.console) ? event.console : [],
-      network: Array.isArray(event.network) ? event.network : [],
-      domSnapshot: asTrimmedString(event.domSnapshot) || null
+      title: asTrimmedString(event.title || event.name || event.command) || null,
+      detail: detailFallback,
+      command: event.command || payloadObj?.command || null,
+      payload: payloadObj || null,
+      console: Array.isArray(event.console)
+        ? event.console
+        : Array.isArray(payloadObj?.console)
+          ? payloadObj.console
+          : [],
+      network: Array.isArray(event.network)
+        ? event.network
+        : Array.isArray(payloadObj?.network)
+          ? payloadObj.network
+          : [],
+      domSnapshot: asTrimmedString(event.domSnapshot || payloadObj?.domSnapshot) || null
     };
     replayQueue.push(enriched);
     return enriched;

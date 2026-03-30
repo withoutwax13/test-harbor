@@ -972,18 +972,45 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
 function renderRunReplayPage(shell, replayDetail, runId) {
   const events = Array.isArray(replayDetail?.events) ? replayDetail.events : [];
   const normalized = events.map((row) => {
-    const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+    let payload = row?.payload;
+    if (typeof payload === 'string') {
+      try {
+        payload = JSON.parse(payload);
+      } catch {
+        payload = { raw: payload };
+      }
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) payload = {};
+
+    const nestedPayload = payload.payload && typeof payload.payload === 'object' ? payload.payload : {};
+    const domSnapshot = typeof payload.domSnapshot === 'string'
+      ? payload.domSnapshot
+      : (typeof nestedPayload.domSnapshot === 'string' ? nestedPayload.domSnapshot : null);
+
+    const consoleItems = Array.isArray(payload.console)
+      ? payload.console
+      : (Array.isArray(nestedPayload.console)
+        ? nestedPayload.console
+        : (payload.console ? [payload.console] : []));
+
+    const networkItems = Array.isArray(payload.network)
+      ? payload.network
+      : (Array.isArray(nestedPayload.network)
+        ? nestedPayload.network
+        : (payload.network ? [payload.network] : []));
+
     return {
       id: row.id,
-      ts: row.event_ts || row.created_at || payload.ts || payload.at || null,
-      type: row.event_type || payload.type || 'replay.event',
-      domSnapshot: typeof payload.domSnapshot === 'string' ? payload.domSnapshot : null,
-      console: Array.isArray(payload.console) ? payload.console : (payload.console ? [payload.console] : []),
-      network: Array.isArray(payload.network) ? payload.network : (payload.network ? [payload.network] : []),
-      command: payload.command || null,
-      title: payload.title || payload.name || null,
-      detail: payload.detail || payload.message || null,
-      payload
+      ts: row.event_ts || row.created_at || payload.ts || payload.at || nestedPayload.ts || nestedPayload.at || null,
+      type: row.event_type || payload.type || nestedPayload.type || 'replay.event',
+      domSnapshot,
+      console: consoleItems,
+      network: networkItems,
+      command: payload.command || nestedPayload.command || null,
+      title: payload.title || payload.name || nestedPayload.title || nestedPayload.name || null,
+      detail: payload.detail || payload.message || nestedPayload.detail || nestedPayload.message || null,
+      payload,
+      nestedPayload
     };
   });
 
@@ -1036,7 +1063,17 @@ function renderRunReplayPage(shell, replayDetail, runId) {
         (() => {
           const dataNode = document.getElementById('replay-data');
           if (!dataNode) return;
-          const events = JSON.parse(dataNode.textContent || '[]');
+
+          let events = [];
+          try {
+            events = JSON.parse(dataNode.textContent || '[]');
+          } catch (error) {
+            // eslint-disable-next-line no-console
+            console.warn('[testharbor] replay JSON parse failed', error?.message || error);
+            events = [];
+          }
+          if (!Array.isArray(events)) events = [];
+
           const slider = document.getElementById('replay-step');
           const list = document.getElementById('replay-step-list');
           const frame = document.getElementById('replay-frame');
@@ -1046,14 +1083,63 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           const networkNode = document.getElementById('replay-network');
           if (!slider || !list || !frame || !meta || !title || !consoleNode || !networkNode) return;
 
+          const escapeHtmlInline = (value) => String(value ?? '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+
+          const firstNonEmpty = (...values) => {
+            for (const value of values) {
+              if (value == null) continue;
+              const asString = typeof value === 'string' ? value.trim() : String(value).trim();
+              if (asString) return asString;
+            }
+            return '';
+          };
+
+          const toPrettyString = (value) => {
+            if (value == null) return '';
+            if (typeof value === 'string') return value;
+            try {
+              return JSON.stringify(value, null, 2);
+            } catch {
+              return String(value);
+            }
+          };
+
+          const toArray = (value) => {
+            if (Array.isArray(value)) return value;
+            if (value == null) return [];
+            return [value];
+          };
+
+          const pickArray = (...candidates) => {
+            for (const candidate of candidates) {
+              const arr = toArray(candidate);
+              if (arr.length) return arr;
+            }
+            return [];
+          };
+
+          const safeIso = (value) => {
+            const date = new Date(value || Date.now());
+            return Number.isNaN(date.getTime()) ? firstNonEmpty(value, 'n/a') : date.toISOString();
+          };
+
           const renderList = () => {
-            list.innerHTML = events.map((event, idx) =>
-              '<button type="button" data-step="' +
-              idx +
-              '" class="button button-secondary" style="justify-content:flex-start; text-align:left; width:100%;">' +
-              (idx + 1) + '. ' + event.type + ' · ' + new Date(event.ts || Date.now()).toISOString() +
-              '</button>'
-            ).join('');
+            list.innerHTML = events.map((event, idx) => {
+              const typeLabel = firstNonEmpty(event?.type, 'replay.event');
+              const titleLabel = firstNonEmpty(event?.title, event?.command, event?.detail);
+              const rowText = (idx + 1) + '. ' + typeLabel + (titleLabel ? ' · ' + titleLabel.slice(0, 90) : '') + ' · ' + safeIso(event?.ts);
+              return '<button type="button" data-step="' +
+                idx +
+                '" class="button button-secondary replay-step-button" style="justify-content:flex-start; text-align:left; width:100%;">' +
+                escapeHtmlInline(rowText) +
+                '</button>';
+            }).join('');
+
             list.querySelectorAll('button[data-step]').forEach((button) => {
               button.addEventListener('click', () => {
                 slider.value = button.dataset.step;
@@ -1063,14 +1149,57 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           };
 
           const renderCurrent = () => {
-            const idx = Number(slider.value || 0);
+            const rawIdx = Number(slider.value || 0);
+            const idx = Number.isFinite(rawIdx) ? Math.min(Math.max(rawIdx, 0), Math.max(events.length - 1, 0)) : 0;
             const event = events[idx] || {};
-            meta.textContent = idx + 1 + ' / ' + events.length;
-            title.textContent = (event.type || 'event') + ' @ ' + (event.ts || 'n/a');
-            const dom = event.domSnapshot || '<html><body style="font-family:sans-serif;padding:16px;"><h3>No DOM snapshot for this step</h3><p>' + (event.type || '') + '</p><pre>' + ((event.detail || '').replace(/[<>&]/g, '')) + '</pre></body></html>';
-            frame.srcdoc = dom;
-            consoleNode.textContent = JSON.stringify(event.console || [], null, 2) || '[]';
-            networkNode.textContent = JSON.stringify(event.network || [], null, 2) || '[]';
+
+            const eventType = firstNonEmpty(event?.type, 'replay.event');
+            const eventTitle = firstNonEmpty(event?.title, event?.command, eventType);
+            const eventDetail = firstNonEmpty(
+              event?.detail,
+              event?.payload?.message,
+              event?.nestedPayload?.message,
+              event?.payload?.detail,
+              event?.nestedPayload?.detail
+            );
+
+            meta.textContent = (events.length ? idx + 1 : 0) + ' / ' + events.length;
+            title.textContent = eventTitle + ' @ ' + safeIso(event?.ts);
+
+            const domSnapshot = typeof event?.domSnapshot === 'string' && event.domSnapshot.trim()
+              ? event.domSnapshot
+              : null;
+
+            if (domSnapshot) {
+              frame.srcdoc = domSnapshot;
+            } else {
+              const payloadPreview = toPrettyString(event?.payload || event);
+              frame.srcdoc = '<html><body style="font-family:system-ui, sans-serif; padding:16px; color:#111827;">' +
+                '<h3>No DOM snapshot for this step</h3>' +
+                '<p><strong>Type:</strong> ' + escapeHtmlInline(eventType) + '</p>' +
+                '<p><strong>Title:</strong> ' + escapeHtmlInline(eventTitle) + '</p>' +
+                '<p><strong>Detail:</strong> ' + escapeHtmlInline(eventDetail || 'No detail captured') + '</p>' +
+                '<pre style="white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;">' +
+                escapeHtmlInline(payloadPreview.slice(0, 12000)) +
+                '</pre>' +
+                '</body></html>';
+            }
+
+            const consoleData = pickArray(event?.console, event?.payload?.console, event?.nestedPayload?.console);
+            const networkData = pickArray(event?.network, event?.payload?.network, event?.nestedPayload?.network);
+
+            consoleNode.textContent = consoleData.length
+              ? JSON.stringify(consoleData, null, 2)
+              : 'No console payload for this step.\n\nType: ' + eventType + '\nTitle: ' + eventTitle + '\nDetail: ' + (eventDetail || 'n/a');
+
+            networkNode.textContent = networkData.length
+              ? JSON.stringify(networkData, null, 2)
+              : 'No network payload for this step.\n\nType: ' + eventType + '\nTitle: ' + eventTitle + '\nDetail: ' + (eventDetail || 'n/a');
+
+            list.querySelectorAll('button[data-step]').forEach((button) => {
+              const isActive = Number(button.dataset.step) === idx;
+              button.classList.toggle('replay-step-active', isActive);
+            });
           };
 
           renderList();
