@@ -1510,10 +1510,12 @@ function renderAdminPage(shell, hooksResp, deliveriesResp, logsResp) {
 }
 
 app.get('/assets/styles.css', async (_request, reply) => {
+  reply.header('cache-control', 'no-store, no-cache, must-revalidate, max-age=0');
   reply.type('text/css').send(stylesCss);
 });
 
 app.get('/assets/web.js', async (_request, reply) => {
+  reply.header('cache-control', 'no-store, no-cache, must-revalidate, max-age=0');
   reply.type('application/javascript').send(appJs);
 });
 
