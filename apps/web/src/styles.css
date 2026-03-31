@@ -476,6 +476,32 @@ th, td {
   gap: 2px;
 }
 
+.replay-step-command-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.replay-step-state-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  background: rgba(89, 102, 111, 0.45);
+}
+
+.replay-step-state-dot-passed {
+  background: rgba(47, 125, 79, 0.9);
+}
+
+.replay-step-state-dot-failed {
+  background: rgba(173, 57, 37, 0.9);
+}
+
+.replay-step-state-dot-pending {
+  background: rgba(173, 123, 23, 0.9);
+}
+
 .replay-step-command {
   font-size: 0.92rem;
 }
@@ -549,9 +575,29 @@ th, td {
   color: var(--muted);
 }
 
+#replay-step-warning {
+  margin-bottom: 10px;
+  border: 1px solid rgba(173, 123, 23, 0.28);
+  background: rgba(255, 247, 224, 0.92);
+}
+
+#replay-step-warning strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--warning);
+}
+
 .replay-side-log {
   max-height: min(22vh, 220px);
   margin-bottom: 12px;
+}
+
+#replay-element-summary {
+  margin-bottom: 10px;
+}
+
+#replay-element-summary p {
+  margin: 0 0 6px;
 }
 
 .replay-grid {

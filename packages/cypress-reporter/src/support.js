@@ -30,6 +30,103 @@ function serializeValue(value, maxChars = 2000) {
   }
 }
 
+function isTextLikeContentType(contentType = '') {
+  const value = String(contentType || '').toLowerCase();
+  return !value
+    || value.startsWith('text/')
+    || value.includes('json')
+    || value.includes('javascript')
+    || value.includes('xml')
+    || value.includes('html')
+    || value.includes('x-www-form-urlencoded');
+}
+
+function serializeHeaders(headersLike, maxValueChars = 400, maxEntries = 24) {
+  const out = {};
+  if (!headersLike) return out;
+
+  try {
+    const entries = typeof headersLike.entries === 'function'
+      ? Array.from(headersLike.entries())
+      : Array.isArray(headersLike)
+        ? headersLike
+        : Object.entries(headersLike);
+
+    for (const [key, value] of entries.slice(0, maxEntries)) {
+      out[String(key)] = truncateText(String(value), maxValueChars);
+    }
+  } catch {
+    return {};
+  }
+
+  return out;
+}
+
+function parseRawHeaderString(rawHeaders, maxValueChars = 400, maxEntries = 24) {
+  const out = {};
+  const lines = String(rawHeaders || '').split(/\r?\n/).filter(Boolean).slice(0, maxEntries);
+  for (const line of lines) {
+    const separatorIndex = line.indexOf(':');
+    if (separatorIndex === -1) continue;
+    const name = line.slice(0, separatorIndex).trim();
+    const value = line.slice(separatorIndex + 1).trim();
+    if (!name) continue;
+    out[name] = truncateText(value, maxValueChars);
+  }
+  return out;
+}
+
+function serializeBodyPreview(value, maxChars = 1200) {
+  if (value == null || value === '') return null;
+
+  try {
+    if (typeof value === 'string') {
+      return { kind: 'text', preview: truncateText(value, maxChars) };
+    }
+    if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) {
+      return { kind: 'urlsearchparams', preview: truncateText(value.toString(), maxChars) };
+    }
+    if (typeof FormData !== 'undefined' && value instanceof FormData) {
+      const entries = [];
+      for (const [key, entryValue] of value.entries()) {
+        if (typeof File !== 'undefined' && entryValue instanceof File) {
+          entries.push({ key, fileName: entryValue.name, size: entryValue.size, type: entryValue.type || null });
+        } else {
+          entries.push({ key, value: truncateText(String(entryValue), Math.max(120, Math.floor(maxChars / 3))) });
+        }
+        if (entries.length >= 12) break;
+      }
+      return { kind: 'formdata', preview: entries };
+    }
+    if (typeof Blob !== 'undefined' && value instanceof Blob) {
+      return { kind: 'blob', size: value.size, type: value.type || null };
+    }
+    if (ArrayBuffer.isView(value)) {
+      return { kind: value.constructor?.name || 'typedarray', size: value.byteLength };
+    }
+    if (value instanceof ArrayBuffer) {
+      return { kind: 'arraybuffer', size: value.byteLength };
+    }
+    if (typeof value === 'object') {
+      return { kind: 'json', preview: serializeValue(value, maxChars) };
+    }
+    return { kind: typeof value, preview: truncateText(String(value), maxChars) };
+  } catch {
+    return { kind: 'unserializable', preview: truncateText(String(value), maxChars) };
+  }
+}
+
+async function readFetchResponsePreview(response, maxChars = 1200) {
+  try {
+    const contentType = response?.headers?.get?.('content-type') || '';
+    if (!isTextLikeContentType(contentType)) return null;
+    const text = await response.clone().text();
+    return text ? { kind: 'text', preview: truncateText(text, maxChars) } : null;
+  } catch {
+    return null;
+  }
+}
+
 function getSpecPath() {
   return Cypress?.spec?.relative || Cypress?.spec?.name || null;
 }
@@ -38,6 +135,15 @@ function getSpecPath() {
 function toNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
 }
 
 function simpleHash(value) {
@@ -92,11 +198,184 @@ function shouldCaptureDomForCommand(name = '', seq = 0, sampleEvery = 8) {
   return domCommands.has(command) || (seq % Math.max(1, sampleEvery) === 0);
 }
 
+function toEpochMs(value) {
+  if (!value) return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function asArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value == null) return [];
+  return [value];
+}
+
+function serializeTextPreview(value, maxChars = 240) {
+  return truncateText(String(value == null ? '' : value).replace(/\s+/g, ' ').trim(), maxChars);
+}
+
+function cssSegment(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+}
+
+function buildSelectorPath(element, maxDepth = 6) {
+  if (!element || element.nodeType !== 1) return null;
+  const segments = [];
+  let node = element;
+  let depth = 0;
+  while (node && node.nodeType === 1 && depth < maxDepth) {
+    let segment = String(node.tagName || 'node').toLowerCase();
+    if (node.id) {
+      segment += `#${cssSegment(node.id)}`;
+      segments.unshift(segment);
+      break;
+    }
+    const classNames = String(node.className || '')
+      .split(/\s+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    if (classNames.length) {
+      segment += classNames.map((item) => `.${cssSegment(item)}`).join('');
+    }
+    const parent = node.parentElement;
+    if (parent) {
+      const siblings = Array.from(parent.children || []).filter((child) => child.tagName === node.tagName);
+      if (siblings.length > 1) {
+        segment += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+      }
+    }
+    segments.unshift(segment);
+    node = parent;
+    depth += 1;
+  }
+  return segments.join(' > ') || null;
+}
+
+function serializeElement(element, maxTextChars = 240) {
+  if (!element || element.nodeType !== 1) return null;
+  const attributes = {};
+  const preferredAttrs = ['data-cy', 'data-testid', 'data-test', 'name', 'type', 'role', 'aria-label', 'placeholder', 'href', 'value'];
+  for (const attrName of preferredAttrs) {
+    const attrValue = element.getAttribute?.(attrName);
+    if (attrValue != null && attrValue !== '') attributes[attrName] = truncateText(attrValue, 180);
+  }
+
+  const attrEntries = Array.from(element.attributes || [])
+    .filter((attr) => !(attr.name in attributes))
+    .slice(0, 8);
+  for (const attr of attrEntries) {
+    attributes[attr.name] = truncateText(attr.value, 180);
+  }
+
+  const rect = typeof element.getBoundingClientRect === 'function' ? element.getBoundingClientRect() : null;
+  const textPreview = serializeTextPreview(
+    element.innerText || element.textContent || element.value || '',
+    maxTextChars
+  );
+
+  const preferredSelectors = [];
+  if (element.id) preferredSelectors.push(`#${cssSegment(element.id)}`);
+  for (const attrName of ['data-cy', 'data-testid', 'data-test', 'name', 'aria-label']) {
+    const attrValue = element.getAttribute?.(attrName);
+    if (attrValue) preferredSelectors.push(`[${attrName}="${String(attrValue).replace(/"/g, '\\"')}"]`);
+  }
+  const selectorPath = buildSelectorPath(element);
+  if (selectorPath) preferredSelectors.push(selectorPath);
+
+  return {
+    tagName: String(element.tagName || '').toLowerCase() || null,
+    id: element.id || null,
+    classes: String(element.className || '').split(/\s+/).map((item) => item.trim()).filter(Boolean).slice(0, 10),
+    selectorPath,
+    preferredSelectors,
+    attributes,
+    textPreview: textPreview || null,
+    valuePreview: serializeTextPreview(element.value, 120) || null,
+    rect: rect ? {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    } : null
+  };
+}
+
+function serializeTargetMeta(subject, maxTextChars = 240) {
+  const items = [];
+  for (const candidate of asArray(subject)) {
+    if (!candidate) continue;
+    if (candidate.jquery && candidate.length) {
+      for (const element of Array.from(candidate).slice(0, 5)) {
+        const serialized = serializeElement(element, maxTextChars);
+        if (serialized) items.push(serialized);
+      }
+      continue;
+    }
+    if (candidate.nodeType === 1) {
+      const serialized = serializeElement(candidate, maxTextChars);
+      if (serialized) items.push(serialized);
+    }
+  }
+  if (!items.length) return null;
+  return {
+    numElements: items.length,
+    primary: items[0],
+    elements: items
+  };
+}
+
+function getCurrentTargetMeta(maxTextChars = 240) {
+  try {
+    return serializeTargetMeta(Cypress?.state?.('subject'), maxTextChars);
+  } catch {
+    return null;
+  }
+}
+
+function getLogTargetMeta(attrs, log, maxTextChars = 240) {
+  const directTarget = serializeTargetMeta(attrs?.$el || attrs?.el || log?.get?.('$el') || log?.get?.('el'), maxTextChars);
+  return directTarget || getCurrentTargetMeta(maxTextChars);
+}
+
+function getCommandTargetMeta(command, maxTextChars = 240) {
+  const attributes = command?.attributes || {};
+  const directTarget = serializeTargetMeta(
+    attributes.subject || attributes.$el || attributes.el || command?.subject,
+    maxTextChars
+  );
+  return directTarget || getCurrentTargetMeta(maxTextChars);
+}
+
+function captureDomState(maxChars = 120000) {
+  const html = getCurrentDomSnapshot(maxChars);
+  const viewport = getViewportInfo();
+  const hash = html ? simpleHash(html) : null;
+  return {
+    domSnapshot: html || null,
+    domCapture: {
+      available: Boolean(html),
+      capturedAt: toIso(),
+      url: getCurrentUrl(),
+      viewportWidth: viewport.viewportWidth,
+      viewportHeight: viewport.viewportHeight,
+      scrollX: viewport.scrollX,
+      scrollY: viewport.scrollY,
+      domHash: hash,
+      degraded: !html,
+      degradedReason: html ? null : 'document_unavailable'
+    }
+  };
+}
+
 export function installTestHarborReplayHooks(options = {}) {
   if (globalThis.__TESTHARBOR_REPLAY_HOOKS_INSTALLED__) return;
   globalThis.__TESTHARBOR_REPLAY_HOOKS_INSTALLED__ = true;
 
-  const maxEvents = Number(options.maxEvents || Cypress.env('TESTHARBOR_REPLAY_MAX_EVENTS') || 500);
+  const maxEvents = Number(options.maxEvents || Cypress.env('TESTHARBOR_REPLAY_MAX_EVENTS') || 5000);
   const maxDomChars = Number(options.maxDomChars || Cypress.env('TESTHARBOR_REPLAY_MAX_DOM_CHARS') || 120000);
   const maxDetailChars = Number(options.maxDetailChars || Cypress.env('TESTHARBOR_REPLAY_MAX_DETAIL_CHARS') || 5000);
 
@@ -107,12 +386,28 @@ export function installTestHarborReplayHooks(options = {}) {
   const queue = [];
   const domSampleEvery = toNumber(options.domSampleEvery || Cypress.env('TESTHARBOR_REPLAY_DOM_SAMPLE_EVERY') || 1, 1);
   const maxRunnerMessageChars = toNumber(options.maxRunnerMessageChars || Cypress.env('TESTHARBOR_REPLAY_MAX_RUNNER_CHARS') || 1200, 1200);
+  const maxTargetTextChars = toNumber(options.maxTargetTextChars || Cypress.env('TESTHARBOR_REPLAY_MAX_TARGET_TEXT_CHARS') || 240, 240);
+  const maxNetworkBodyChars = toNumber(options.maxNetworkBodyChars || Cypress.env('TESTHARBOR_REPLAY_MAX_NETWORK_BODY_CHARS') || 1200, 1200);
+  const maxNetworkHeaderValueChars = toNumber(options.maxNetworkHeaderValueChars || Cypress.env('TESTHARBOR_REPLAY_MAX_NETWORK_HEADER_VALUE_CHARS') || 400, 400);
+  const maxNetworkHeaderEntries = toNumber(options.maxNetworkHeaderEntries || Cypress.env('TESTHARBOR_REPLAY_MAX_NETWORK_HEADER_ENTRIES') || 24, 24);
   let commandSeq = 0;
-  let lastDomHash = null;
+  let eventSeq = 0;
+
+  function nextEventMeta(stepId, phase = 'event') {
+    eventSeq += 1;
+    return {
+      eventId: `${stepId || 'step'}:${phase}:${eventSeq}`,
+      eventSeq,
+      stepId: stepId || `step:${eventSeq}`,
+      phase
+    };
+  }
 
   function enqueue(event = {}) {
     if (!event || typeof event !== 'object') return;
     if (queue.length >= maxEvents) queue.shift();
+
+    const payload = event.payload && typeof event.payload === 'object' ? event.payload : null;
 
     queue.push({
       type: event.type || 'replay.event',
@@ -120,7 +415,12 @@ export function installTestHarborReplayHooks(options = {}) {
       title: event.title || null,
       detail: event.detail || null,
       command: event.command || null,
-      payload: event.payload || null,
+      status: event.status || payload?.status || null,
+      eventId: event.eventId || payload?.eventId || null,
+      eventSeq: event.eventSeq ?? payload?.eventSeq ?? null,
+      stepId: event.stepId || payload?.stepId || null,
+      phase: event.phase || payload?.phase || null,
+      payload: payload,
       console: Array.isArray(event.console) ? event.console : [],
       network: Array.isArray(event.network) ? event.network : [],
       domSnapshot: typeof event.domSnapshot === 'string' ? event.domSnapshot : null,
@@ -150,11 +450,69 @@ export function installTestHarborReplayHooks(options = {}) {
   }
 
 
+  function normalizeLogMessage(messageValue) {
+    if (Array.isArray(messageValue)) {
+      return truncateText(messageValue.map((part) => serializeValue(part, maxDetailChars)).join(' '), maxDetailChars);
+    }
+    if (messageValue == null) return '';
+    if (typeof messageValue === 'string') return truncateText(messageValue, maxDetailChars);
+    return truncateText(serializeValue(messageValue, maxDetailChars), maxDetailChars);
+  }
+
+  Cypress.on('command:start', (command) => {
+    const attributes = command?.attributes || {};
+    const name = command?.name || attributes.name || 'command';
+    const viewport = getViewportInfo();
+    const stepId = `command:${attributes.id || command?.id || `${name}:${commandSeq + 1}`}`;
+    const eventMeta = nextEventMeta(stepId, 'start');
+    const target = getCommandTargetMeta(command, maxTargetTextChars);
+    const domState = captureDomState(maxDomChars);
+    const startedAt = attributes.wallClockStartedAt || toIso();
+
+    enqueue({
+      type: 'replay.command.started',
+      title: name,
+      detail: `Command ${name} started`,
+      command: name,
+      status: attributes.state || command?.state || 'pending',
+      ...eventMeta,
+      ...domState,
+      payload: {
+        ...eventMeta,
+        name,
+        displayName: attributes.displayName || name,
+        id: attributes.id || command?.id || null,
+        chainerId: attributes.chainerId || null,
+        state: attributes.state || command?.state || 'pending',
+        status: attributes.state || command?.state || 'pending',
+        message: serializeValue(attributes.message, maxRunnerMessageChars) || null,
+        args: serializeValue(attributes.args || command?.args || null, maxRunnerMessageChars),
+        aliases: serializeValue(attributes.aliases || attributes.alias || null, maxRunnerMessageChars),
+        numElements: attributes.numElements ?? null,
+        wallClockStartedAt: startedAt,
+        wallClockStartedAtMs: toEpochMs(startedAt),
+        url: getCurrentUrl(),
+        viewportWidth: viewport.viewportWidth,
+        viewportHeight: viewport.viewportHeight,
+        scrollX: viewport.scrollX,
+        scrollY: viewport.scrollY,
+        target,
+        domCapture: {
+          ...domState.domCapture,
+          exactForStep: Boolean(domState.domSnapshot)
+        }
+      }
+    });
+  });
+
   Cypress.on('command:end', (command) => {
     const attributes = command?.attributes || {};
     const name = command?.name || attributes.name || 'command';
     const message = attributes.message || null;
     commandSeq += 1;
+    const stepId = `command:${attributes.id || command?.id || `${name}:${commandSeq}`}`;
+    const eventMeta = nextEventMeta(stepId, 'end');
+    const target = getCommandTargetMeta(command, maxTargetTextChars);
 
     let consoleProps = null;
     try {
@@ -167,60 +525,196 @@ export function installTestHarborReplayHooks(options = {}) {
       consoleProps = null;
     }
 
-    let domSnapshot = null;
-    if (captureDom && shouldCaptureDomForCommand(name, commandSeq, domSampleEvery)) {
-      const candidate = getCurrentDomSnapshot(maxDomChars);
-      if (candidate) {
-        const hash = simpleHash(candidate);
-        if (hash !== lastDomHash) {
-          domSnapshot = candidate;
-          lastDomHash = hash;
-        }
-      }
-    }
-
     const viewport = getViewportInfo();
+    const shouldCaptureDom = captureDom && shouldCaptureDomForCommand(name, commandSeq, domSampleEvery);
+    const domState = shouldCaptureDom
+      ? captureDomState(maxDomChars)
+      : {
+          domSnapshot: null,
+          domCapture: {
+            available: false,
+            capturedAt: toIso(),
+            url: getCurrentUrl(),
+            viewportWidth: viewport.viewportWidth,
+            viewportHeight: viewport.viewportHeight,
+            scrollX: viewport.scrollX,
+            scrollY: viewport.scrollY,
+            domHash: null,
+            degraded: true,
+            degradedReason: 'dom_sampling_skipped'
+          }
+        };
+    const endedAt = toIso();
+    const startedAt = attributes.wallClockStartedAt || null;
+    const durationMs = startedAt ? Math.max(0, (toEpochMs(endedAt) || 0) - (toEpochMs(startedAt) || 0)) : null;
 
     enqueue({
       type: 'replay.command',
       title: name,
       detail: message ? truncateText(message, maxDetailChars) : `Command ${name}`,
       command: name,
-      domSnapshot,
+      status: attributes.state || command?.state || null,
+      ...eventMeta,
+      ...domState,
       payload: {
+        ...eventMeta,
         name,
+        displayName: attributes.displayName || name,
         message: message ? truncateText(message, maxDetailChars) : null,
         state: attributes.state || command?.state || null,
+        status: attributes.state || command?.state || null,
         chainerId: attributes.chainerId || null,
-        wallClockStartedAt: attributes.wallClockStartedAt || null,
-        endedAt: toIso(),
+        id: attributes.id || command?.id || null,
+        aliases: serializeValue(attributes.aliases || attributes.alias || null, maxRunnerMessageChars),
+        args: serializeValue(attributes.args || command?.args || null, maxRunnerMessageChars),
+        numElements: attributes.numElements ?? target?.numElements ?? null,
+        wallClockStartedAt: startedAt,
+        wallClockStartedAtMs: toEpochMs(startedAt),
+        wallClockEndedAt: endedAt,
+        wallClockEndedAtMs: toEpochMs(endedAt),
+        elapsedMs: durationMs,
+        endedAt,
         url: getCurrentUrl(),
         viewportWidth: viewport.viewportWidth,
         viewportHeight: viewport.viewportHeight,
         scrollX: viewport.scrollX,
         scrollY: viewport.scrollY,
-        consoleProps
+        consoleProps,
+        target,
+        domCapture: {
+          ...domState.domCapture,
+          exactForStep: Boolean(domState.domSnapshot)
+        }
       }
     });
   });
 
-  Cypress.on('log:added', (attrs) => {
-    if (!attrs || attrs.instrument === 'command') return;
-    const name = attrs.displayName || attrs.name;
+  Cypress.on('log:added', (attrs, log) => {
+    if (!attrs) return;
+    const name = attrs.displayName || attrs.name || log?.get?.('name') || null;
     if (!name) return;
-    const message = Array.isArray(attrs.message)
-      ? attrs.message.map((part) => truncateText(part, maxDetailChars)).join(' ')
-      : truncateText(attrs.message || '', maxDetailChars);
+    const message = normalizeLogMessage(attrs.message ?? log?.get?.('message'));
+    const instrument = String(attrs.instrument || log?.get?.('instrument') || 'log').toLowerCase();
+    const state = firstNonEmpty(attrs.state, log?.get?.('state')) || null;
+    const stepId = `log:${attrs.id || log?.get?.('id') || `${name}:${eventSeq + 1}`}`;
+    const eventMeta = nextEventMeta(stepId, 'added');
+    const target = getLogTargetMeta(attrs, log, maxTargetTextChars);
+    const viewport = getViewportInfo();
+    const domState = captureDom
+      ? captureDomState(maxDomChars)
+      : {
+          domSnapshot: null,
+          domCapture: {
+            available: false,
+            capturedAt: toIso(),
+            url: getCurrentUrl(),
+            viewportWidth: viewport.viewportWidth,
+            viewportHeight: viewport.viewportHeight,
+            scrollX: viewport.scrollX,
+            scrollY: viewport.scrollY,
+            domHash: null,
+            degraded: true,
+            degradedReason: 'dom_capture_disabled'
+          }
+        };
 
     enqueue({
-      type: 'replay.log',
+      type: instrument === 'command' ? 'replay.cypress.command.log' : 'replay.cypress.log',
       title: String(name),
       detail: message || null,
+      status: state,
+      ...eventMeta,
+      ...domState,
       payload: {
+        ...eventMeta,
+        id: attrs.id || log?.get?.('id') || null,
+        instrument,
         name,
-        state: attrs.state || null,
+        displayName: attrs.displayName || log?.get?.('displayName') || name,
+        state,
+        status: state,
         message,
-        consoleProps: serializeValue(attrs.consoleProps || null, maxDetailChars)
+        alias: attrs.alias || log?.get?.('alias') || null,
+        aliases: serializeValue(attrs.aliases || attrs.alias || log?.get?.('aliases') || log?.get?.('alias') || null, maxDetailChars),
+        referencesAlias: attrs.referencesAlias || log?.get?.('referencesAlias') || null,
+        numElements: attrs.numElements ?? log?.get?.('numElements') ?? target?.numElements ?? null,
+        renderProps: serializeValue(attrs.renderProps || log?.get?.('renderProps') || null, maxDetailChars),
+        consoleProps: serializeValue(attrs.consoleProps || log?.get?.('consoleProps') || null, maxDetailChars),
+        eventProps: serializeValue(attrs.eventProps || log?.get?.('eventProps') || null, maxDetailChars),
+        snapshots: serializeValue(attrs.snapshots || log?.get?.('snapshots') || null, maxDetailChars),
+        wallClockStartedAt: attrs.wallClockStartedAt || log?.get?.('wallClockStartedAt') || null,
+        wallClockStartedAtMs: toEpochMs(attrs.wallClockStartedAt || log?.get?.('wallClockStartedAt') || null),
+        url: getCurrentUrl(),
+        target,
+        domCapture: {
+          ...domState.domCapture,
+          exactForStep: Boolean(domState.domSnapshot)
+        }
+      }
+    });
+  });
+
+  Cypress.on('log:changed', (attrs, log) => {
+    if (!attrs && !log) return;
+    const name = attrs?.displayName || attrs?.name || log?.get?.('name') || null;
+    if (!name) return;
+
+    const message = normalizeLogMessage(attrs?.message ?? log?.get?.('message'));
+    const instrument = String(attrs?.instrument || log?.get?.('instrument') || 'log').toLowerCase();
+    const state = firstNonEmpty(attrs?.state, log?.get?.('state')) || null;
+    const stepId = `log:${attrs?.id || log?.get?.('id') || `${name}:${eventSeq + 1}`}`;
+    const eventMeta = nextEventMeta(stepId, 'changed');
+    const target = getLogTargetMeta(attrs, log, maxTargetTextChars);
+    const viewport = getViewportInfo();
+    const domState = captureDom
+      ? captureDomState(maxDomChars)
+      : {
+          domSnapshot: null,
+          domCapture: {
+            available: false,
+            capturedAt: toIso(),
+            url: getCurrentUrl(),
+            viewportWidth: viewport.viewportWidth,
+            viewportHeight: viewport.viewportHeight,
+            scrollX: viewport.scrollX,
+            scrollY: viewport.scrollY,
+            domHash: null,
+            degraded: true,
+            degradedReason: 'dom_capture_disabled'
+          }
+        };
+
+    enqueue({
+      type: instrument === 'command' ? 'replay.cypress.command.log.changed' : 'replay.cypress.log.changed',
+      title: String(name),
+      detail: message || null,
+      status: state,
+      ...eventMeta,
+      ...domState,
+      payload: {
+        ...eventMeta,
+        id: attrs?.id || log?.get?.('id') || null,
+        instrument,
+        name,
+        displayName: attrs?.displayName || log?.get?.('displayName') || name,
+        state,
+        status: state,
+        message,
+        alias: attrs?.alias || log?.get?.('alias') || null,
+        aliases: serializeValue(attrs?.aliases || attrs?.alias || log?.get?.('aliases') || log?.get?.('alias') || null, maxDetailChars),
+        referencesAlias: attrs?.referencesAlias || log?.get?.('referencesAlias') || null,
+        numElements: attrs?.numElements ?? log?.get?.('numElements') ?? target?.numElements ?? null,
+        renderProps: serializeValue(attrs?.renderProps || log?.get?.('renderProps') || null, maxDetailChars),
+        consoleProps: serializeValue(attrs?.consoleProps || log?.get?.('consoleProps') || null, maxDetailChars),
+        eventProps: serializeValue(attrs?.eventProps || log?.get?.('eventProps') || null, maxDetailChars),
+        snapshots: serializeValue(attrs?.snapshots || log?.get?.('snapshots') || null, maxDetailChars),
+        url: getCurrentUrl(),
+        changedAt: toIso(),
+        target,
+        domCapture: {
+          ...domState.domCapture,
+          exactForStep: Boolean(domState.domSnapshot)
+        }
       }
     });
   });
@@ -238,6 +732,7 @@ export function installTestHarborReplayHooks(options = {}) {
             type: 'replay.console',
             title: `console.${level}`,
             detail: truncateText(args.map((arg) => serializeValue(arg, 500)).join(' '), maxDetailChars),
+            ...nextEventMeta(`console:${level}:${eventSeq + 1}`, 'emitted'),
             console: [{ level, args: args.map((arg) => serializeValue(arg, 500)) }]
           });
           return original.apply(this, args);
@@ -253,34 +748,67 @@ export function installTestHarborReplayHooks(options = {}) {
         const requestInit = args[1] || {};
         const method = String(requestInit.method || requestInput?.method || 'GET').toUpperCase();
         const url = truncateText(typeof requestInput === 'string' ? requestInput : requestInput?.url || '', 1000);
+        const requestHeaders = serializeHeaders(
+          requestInit.headers || requestInput?.headers,
+          maxNetworkHeaderValueChars,
+          maxNetworkHeaderEntries
+        );
+        const requestBody = serializeBodyPreview(requestInit.body, maxNetworkBodyChars);
 
         try {
           const response = await originalFetch(...args);
+          const endedAt = Date.now();
+          const responseHeaders = serializeHeaders(
+            response?.headers,
+            maxNetworkHeaderValueChars,
+            maxNetworkHeaderEntries
+          );
+          const responseBody = await readFetchResponsePreview(response, maxNetworkBodyChars);
           enqueue({
             type: 'replay.network',
             title: `${method} ${url}`,
             detail: `HTTP ${response.status}`,
+            ...nextEventMeta(`network:fetch:${method}:${url}:${eventSeq + 1}`, 'completed'),
             network: [{
               transport: 'fetch',
               method,
               url,
               status: response.status,
+              statusText: response.statusText || null,
               ok: response.ok,
-              durationMs: Date.now() - startedAt
+              redirected: response.redirected === true,
+              responseUrl: response.url || null,
+              requestHeaders,
+              requestBody,
+              responseHeaders,
+              responseBody,
+              timing: {
+                startedAt: toIso(startedAt),
+                endedAt: toIso(endedAt),
+                durationMs: endedAt - startedAt
+              }
             }]
           });
           return response;
         } catch (error) {
+          const endedAt = Date.now();
           enqueue({
             type: 'replay.network',
             title: `${method} ${url}`,
             detail: `Network error: ${truncateText(error?.message || String(error), 500)}`,
+            ...nextEventMeta(`network:fetch:${method}:${url}:${eventSeq + 1}`, 'failed'),
             network: [{
               transport: 'fetch',
               method,
               url,
               error: truncateText(error?.message || String(error), 500),
-              durationMs: Date.now() - startedAt
+              requestHeaders,
+              requestBody,
+              timing: {
+                startedAt: toIso(startedAt),
+                endedAt: toIso(endedAt),
+                durationMs: endedAt - startedAt
+              }
             }]
           });
           throw error;
@@ -292,29 +820,59 @@ export function installTestHarborReplayHooks(options = {}) {
       const xhrProto = win.XMLHttpRequest.prototype;
       const originalOpen = xhrProto.open;
       const originalSend = xhrProto.send;
+      const originalSetRequestHeader = xhrProto.setRequestHeader;
 
       xhrProto.open = function patchedOpen(method, url, ...rest) {
         this.__thReplayMethod = method;
         this.__thReplayUrl = url;
+        this.__thReplayRequestHeaders = {};
         return originalOpen.call(this, method, url, ...rest);
+      };
+
+      xhrProto.setRequestHeader = function patchedSetRequestHeader(name, value) {
+        if (!this.__thReplayRequestHeaders) this.__thReplayRequestHeaders = {};
+        this.__thReplayRequestHeaders[String(name)] = truncateText(String(value), maxNetworkHeaderValueChars);
+        return originalSetRequestHeader.call(this, name, value);
       };
 
       xhrProto.send = function patchedSend(...args) {
         const startedAt = Date.now();
         const method = String(this.__thReplayMethod || 'GET').toUpperCase();
         const url = truncateText(this.__thReplayUrl || '', 1000);
+        const requestBody = serializeBodyPreview(args[0], maxNetworkBodyChars);
 
         this.addEventListener('loadend', () => {
+          const endedAt = Date.now();
+          const rawResponseHeaders = typeof this.getAllResponseHeaders === 'function' ? this.getAllResponseHeaders() : '';
+          const responseHeaders = parseRawHeaderString(rawResponseHeaders, maxNetworkHeaderValueChars, maxNetworkHeaderEntries);
+          const responseBody = this.responseType === 'json'
+            ? serializeBodyPreview(this.response, maxNetworkBodyChars)
+            : (this.responseType && this.responseType !== '' && this.responseType !== 'text'
+              ? { kind: this.responseType, size: Number(this.response?.byteLength || this.response?.size || 0) || null }
+              : serializeBodyPreview(this.responseText, maxNetworkBodyChars));
           enqueue({
             type: 'replay.network',
             title: `${method} ${url}`,
             detail: `HTTP ${this.status || 0}`,
+            ...nextEventMeta(`network:xhr:${method}:${url}:${eventSeq + 1}`, 'completed'),
             network: [{
               transport: 'xhr',
               method,
               url,
               status: this.status || 0,
-              durationMs: Date.now() - startedAt
+              statusText: this.statusText || null,
+              ok: this.status >= 200 && this.status < 400,
+              responseUrl: this.responseURL || null,
+              redirected: Boolean(this.responseURL && this.responseURL !== url),
+              requestHeaders: this.__thReplayRequestHeaders || {},
+              requestBody,
+              responseHeaders,
+              responseBody,
+              timing: {
+                startedAt: toIso(startedAt),
+                endedAt: toIso(endedAt),
+                durationMs: endedAt - startedAt
+              }
             }]
           });
         });
@@ -330,6 +888,7 @@ export function installTestHarborReplayHooks(options = {}) {
           type: 'replay.js.error',
           title: 'window.error',
           detail: truncateText(msg, maxDetailChars),
+          ...nextEventMeta(`window:error:${eventSeq + 1}`, 'captured'),
           console: [{
             level: 'error',
             source: 'window.error',
@@ -356,6 +915,7 @@ export function installTestHarborReplayHooks(options = {}) {
           type: 'replay.js.unhandledrejection',
           title: 'unhandledrejection',
           detail: truncateText(message, maxDetailChars),
+          ...nextEventMeta(`window:unhandledrejection:${eventSeq + 1}`, 'captured'),
           console: [{ level: 'error', source: 'unhandledrejection', message: truncateText(message, maxDetailChars) }],
           payload: {
             url: getCurrentUrl(),
@@ -372,23 +932,17 @@ export function installTestHarborReplayHooks(options = {}) {
       const test = this?.currentTest;
       const titlePath = typeof test?.titlePath === 'function' ? test.titlePath() : [];
       const viewport = getViewportInfo();
-      let domSnapshot = null;
-      if (captureDom) {
-        const candidate = getCurrentDomSnapshot(maxDomChars);
-        if (candidate) {
-          const hash = simpleHash(candidate);
-          if (hash !== lastDomHash) {
-            domSnapshot = candidate;
-            lastDomHash = hash;
-          }
-        }
-      }
+      const stepId = `test:${simpleHash(typeof test?.fullTitle === 'function' ? test.fullTitle() : test?.title || 'test')}`;
+      const eventMeta = nextEventMeta(stepId, 'start');
+      const domState = captureDom ? captureDomState(maxDomChars) : { domSnapshot: null, domCapture: { available: false, degraded: true, degradedReason: 'dom_capture_disabled' } };
       enqueue({
         type: 'replay.test.started',
         title: test?.title || 'test',
         detail: titlePath.length ? titlePath.join(' > ') : 'Test started',
-        domSnapshot,
+        ...eventMeta,
+        ...domState,
         payload: {
+          ...eventMeta,
           testTitle: test?.title || null,
           fullTitle: typeof test?.fullTitle === 'function' ? test.fullTitle() : null,
           specPath: getSpecPath(),
@@ -397,7 +951,11 @@ export function installTestHarborReplayHooks(options = {}) {
           viewportWidth: viewport.viewportWidth,
           viewportHeight: viewport.viewportHeight,
           scrollX: viewport.scrollX,
-          scrollY: viewport.scrollY
+          scrollY: viewport.scrollY,
+          domCapture: {
+            ...domState.domCapture,
+            exactForStep: Boolean(domState.domSnapshot)
+          }
         }
       });
     });
@@ -408,14 +966,20 @@ export function installTestHarborReplayHooks(options = {}) {
       const test = this?.currentTest;
       const titlePath = typeof test?.titlePath === 'function' ? test.titlePath() : [];
       const viewport = getViewportInfo();
+      const stepId = `test:${simpleHash(typeof test?.fullTitle === 'function' ? test.fullTitle() : test?.title || 'test')}`;
+      const eventMeta = nextEventMeta(stepId, 'end');
       const finishEvent = {
         type: 'replay.test.finished',
         title: test?.title || 'test',
         detail: `Test ${(test?.state || 'unknown').toUpperCase()}`,
+        status: test?.state || null,
+        ...eventMeta,
         payload: {
+          ...eventMeta,
           testTitle: test?.title || null,
           fullTitle: typeof test?.fullTitle === 'function' ? test.fullTitle() : null,
           state: test?.state || null,
+          status: test?.state || null,
           duration: test?.duration ?? null,
           specPath: getSpecPath(),
           endedAt: toIso(),
@@ -438,26 +1002,29 @@ export function installTestHarborReplayHooks(options = {}) {
       return cy.document({ log: false }).then((doc) => {
         const domSnapshot = truncateText(doc?.documentElement?.outerHTML || '', maxDomChars);
         if (domSnapshot) {
-          const hash = simpleHash(domSnapshot);
-          if (hash !== lastDomHash) {
-            lastDomHash = hash;
-            enqueue({
-              type: 'replay.dom.snapshot',
-              title: test?.title || 'DOM snapshot',
-              detail: `Captured ${domSnapshot.length} chars`,
-              domSnapshot,
-              payload: {
-                testTitle: test?.title || null,
-                state: test?.state || null,
-                url: getCurrentUrl(),
-                viewportWidth: viewport.viewportWidth,
-                viewportHeight: viewport.viewportHeight,
-                scrollX: viewport.scrollX,
-                scrollY: viewport.scrollY,
-                capturedAt: toIso()
+          const domCapture = captureDomState(maxDomChars).domCapture;
+          enqueue({
+            type: 'replay.dom.snapshot',
+            title: test?.title || 'DOM snapshot',
+            detail: `Captured ${domSnapshot.length} chars`,
+            ...nextEventMeta(`${stepId}:dom`, 'snapshot'),
+            domSnapshot,
+            payload: {
+              testTitle: test?.title || null,
+              state: test?.state || null,
+              status: test?.state || null,
+              url: getCurrentUrl(),
+              viewportWidth: viewport.viewportWidth,
+              viewportHeight: viewport.viewportHeight,
+              scrollX: viewport.scrollX,
+              scrollY: viewport.scrollY,
+              capturedAt: toIso(),
+              domCapture: {
+                ...domCapture,
+                exactForStep: true
               }
-            });
-          }
+            }
+          });
         }
       }).then(() => captureAndFlush());
     });

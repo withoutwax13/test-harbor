@@ -310,6 +310,11 @@ export function setupTestHarbor(on, config, options = {}) {
       title: asTrimmedString(event.title || event.name || event.command) || null,
       detail: detailFallback,
       command: event.command || payloadObj?.command || null,
+      status: asTrimmedString(event.status || payloadObj?.status || payloadObj?.state) || null,
+      eventId: asTrimmedString(event.eventId || payloadObj?.eventId) || null,
+      eventSeq: Number.isFinite(Number(event.eventSeq ?? payloadObj?.eventSeq)) ? Number(event.eventSeq ?? payloadObj?.eventSeq) : null,
+      stepId: asTrimmedString(event.stepId || payloadObj?.stepId) || null,
+      phase: asTrimmedString(event.phase || payloadObj?.phase) || null,
       specRunId: asTrimmedString(event.specRunId || payloadObj?.specRunId || payloadObj?.spec_run_id) || null,
       specPath: asTrimmedString(event.specPath || payloadObj?.specPath || payloadObj?.spec_path) || null,
       testResultId: asTrimmedString(event.testResultId || payloadObj?.testResultId || payloadObj?.test_result_id) || null,
@@ -460,7 +465,8 @@ export function setupTestHarbor(on, config, options = {}) {
             ...(eventSpecPath ? { specPath: eventSpecPath } : {}),
             ...(eventSpecRunId ? { specRunId: eventSpecRunId } : {}),
             title: event?.title || event?.name,
-            ts: toIso(event?.ts || entry?.at || new Date())
+            ts: toIso(event?.ts || entry?.at || new Date()),
+            status: event?.status || event?.payload?.status || event?.payload?.state || null
           });
         }
 

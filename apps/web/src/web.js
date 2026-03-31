@@ -42,32 +42,42 @@ function initReplayPage() {
   const dataNode = document.getElementById('replay-data');
   if (!dataNode) return;
 
-  function decodeReplayData(encoded) {
-    if (!encoded) return [];
+  const mediaNode = document.getElementById('replay-media-data');
+
+  function decodePayload(encoded, fallbackValue) {
+    if (!encoded) return fallbackValue;
     try {
       const binary = atob(String(encoded).trim());
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
       const decoded = new TextDecoder('utf-8').decode(bytes);
-      const parsed = JSON.parse(decoded || '[]');
-      return Array.isArray(parsed) ? parsed : [];
+      const parsed = JSON.parse(decoded || 'null');
+      return parsed == null ? fallbackValue : parsed;
     } catch (error) {
       // eslint-disable-next-line no-console
       console.warn('[testharbor] replay payload decode failed', error && error.message ? error.message : error);
-      return [];
+      return fallbackValue;
     }
   }
 
-  const events = decodeReplayData(dataNode.textContent || '');
+  const events = decodePayload(dataNode.textContent || '', []);
+  const mediaPayload = decodePayload(mediaNode?.textContent || '', { videos: [] }) || { videos: [] };
 
   const slider = document.getElementById('replay-step');
   const list = document.getElementById('replay-step-list');
   const frame = document.getElementById('replay-frame');
+  const videoNode = document.getElementById('replay-video');
   const frameStage = document.getElementById('replay-frame-stage');
   const replayShell = document.getElementById('replay-shell');
   const modalToggleButton = document.getElementById('replay-toggle-modal');
+  const visualSourceSelect = document.getElementById('replay-visual-source');
+  const visualMetaNode = document.getElementById('replay-visual-meta');
+  const warningNode = document.getElementById('replay-step-warning');
   const meta = document.getElementById('replay-step-meta');
   const title = document.getElementById('replay-event-title');
+  const elementStatusNode = document.getElementById('replay-element-status');
+  const elementSummaryNode = document.getElementById('replay-element-summary');
+  const elementMetaNode = document.getElementById('replay-element-meta');
   const consoleNode = document.getElementById('replay-console');
   const networkNode = document.getElementById('replay-network');
   const runnerNode = document.getElementById('replay-runner-log');
@@ -77,7 +87,7 @@ function initReplayPage() {
   const prevButton = document.getElementById('replay-step-prev');
   const nextButton = document.getElementById('replay-step-next');
 
-  if (!slider || !list || !frame || !frameStage || !meta || !title || !consoleNode || !networkNode || !runnerNode || !specSelect || !speedSelect || !playPauseButton || !prevButton || !nextButton) return;
+  if (!slider || !list || !frame || !videoNode || !frameStage || !meta || !title || !consoleNode || !networkNode || !runnerNode || !specSelect || !speedSelect || !playPauseButton || !prevButton || !nextButton || !warningNode || !elementStatusNode || !elementSummaryNode || !elementMetaNode) return;
 
   function asObject(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -255,6 +265,15 @@ function initReplayPage() {
     const stageRect = frameStage.getBoundingClientRect();
     if (!stageRect.width || !stageRect.height) return;
 
+    if (visualMode === 'video' && videoNode && videoNode.style.display !== 'none') {
+      const fittedHeight = Math.max(220, Math.round(stageRect.height));
+      frameStage.style.minHeight = `${fittedHeight}px`;
+      videoNode.style.width = '100%';
+      videoNode.style.height = `${Math.max(220, Math.round(stageRect.height - 8))}px`;
+      videoNode.style.objectFit = 'contain';
+      return;
+    }
+
     let width = Number(viewportMeta?.width || 1280) || 1280;
     let height = Number(viewportMeta?.height || 720) || 720;
 
@@ -313,7 +332,110 @@ function initReplayPage() {
     const e = asObject(event);
     const payload = asObject(e.payload);
     const nested = asObject(payload.payload);
-    return normalizeSerializedText(firstNonEmpty(e.domSnapshot, payload.domSnapshot, nested.domSnapshot));
+    return normalizeSerializedText(firstNonEmpty(
+      e.domSnapshot,
+      payload.domSnapshot,
+      payload.domCapture && payload.domCapture.html,
+      e.domCapture && e.domCapture.html,
+      nested.domSnapshot,
+      nested.domCapture && nested.domCapture.html
+    ));
+  }
+
+  function extractDomMeta(event) {
+    const e = asObject(event);
+    const payload = asObject(e.payload);
+    const nested = asObject(payload.payload);
+    return asObject(e.domCapture && Object.keys(e.domCapture).length ? e.domCapture : (payload.domCapture && Object.keys(payload.domCapture).length ? payload.domCapture : nested.domCapture));
+  }
+
+  function extractTarget(event) {
+    const e = asObject(event);
+    const payload = asObject(e.payload);
+    const nested = asObject(payload.payload);
+    const target = asObject(e.target && Object.keys(e.target).length ? e.target : (payload.target && Object.keys(payload.target).length ? payload.target : (payload.targetElement && Object.keys(payload.targetElement).length ? payload.targetElement : (nested.target && Object.keys(nested.target).length ? nested.target : nested.targetElement))));
+    return target;
+  }
+
+  function cssSegment(value) {
+    const text = firstNonEmpty(value);
+    if (!text) return '';
+    return text.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+  }
+
+  function buildElementSelectorPath(element, maxDepth) {
+    const limit = Number(maxDepth || 6);
+    if (!element || element.nodeType !== 1) return null;
+    const segments = [];
+    let node = element;
+    let depth = 0;
+
+    while (node && node.nodeType === 1 && depth < limit) {
+      let segment = String(node.tagName || 'node').toLowerCase();
+      if (node.id) {
+        segment += `#${cssSegment(node.id)}`;
+        segments.unshift(segment);
+        break;
+      }
+
+      const classNames = String(node.className || '')
+        .split(/\s+/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 3);
+
+      if (classNames.length) {
+        segment += classNames.map((item) => `.${cssSegment(item)}`).join('');
+      }
+
+      const parent = node.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children || []).filter((child) => child.tagName === node.tagName);
+        if (siblings.length > 1) segment += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+      }
+
+      segments.unshift(segment);
+      node = parent;
+      depth += 1;
+    }
+
+    return segments.join(' > ') || null;
+  }
+
+  function serializeInspectorElement(element) {
+    if (!element || element.nodeType !== 1) return null;
+    const attributes = {};
+    for (const attr of Array.from(element.attributes || []).slice(0, 12)) {
+      attributes[attr.name] = String(attr.value || '').slice(0, 200);
+    }
+
+    const rect = typeof element.getBoundingClientRect === 'function' ? element.getBoundingClientRect() : null;
+    return {
+      tagName: String(element.tagName || '').toLowerCase() || null,
+      id: element.id || null,
+      selectorPath: buildElementSelectorPath(element),
+      classes: String(element.className || '').split(/\s+/).map((item) => item.trim()).filter(Boolean).slice(0, 10),
+      attributes,
+      textPreview: normalizeSerializedText((element.innerText || element.textContent || '').replace(/\s+/g, ' ').trim()).slice(0, 240) || null,
+      bounds: rect ? {
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height)
+      } : null
+    };
+  }
+
+  function extractStepIdentity(event) {
+    const e = asObject(event);
+    const payload = asObject(e.payload);
+    const nested = asObject(payload.payload);
+    return {
+      stepId: firstNonEmpty(e.stepId, payload.stepId, nested.stepId),
+      eventId: firstNonEmpty(e.eventId, payload.eventId, nested.eventId),
+      phase: firstNonEmpty(e.phase, payload.phase, nested.phase),
+      seq: firstNonEmpty(e.eventSeq, payload.eventSeq, nested.eventSeq)
+    };
   }
 
   function extractRunnerLine(event) {
@@ -324,6 +446,8 @@ function initReplayPage() {
     const low = String(type).toLowerCase();
     const include = low.startsWith('replay.command')
       || low.startsWith('replay.log')
+      || low.startsWith('replay.cypress.log')
+      || low.startsWith('replay.cypress.command.log')
       || low.startsWith('replay.test')
       || low.startsWith('replay.spec')
       || low.startsWith('replay.run')
@@ -335,15 +459,40 @@ function initReplayPage() {
       ts: firstNonEmpty(e.ts, payload.ts, nested.ts),
       type,
       title: firstNonEmpty(e.title, e.command, payload.name, payload.command, nested.name, nested.command, 'n/a'),
-      detail: firstNonEmpty(e.detail, payload.message, nested.message, payload.detail, nested.detail)
+      detail: firstNonEmpty(e.detail, payload.message, nested.message, payload.detail, nested.detail),
+      status: firstNonEmpty(e.status, payload.status, payload.state, nested.status, nested.state),
+      displayName: firstNonEmpty(payload.displayName, nested.displayName),
+      aliases: payload.aliases || nested.aliases || payload.alias || nested.alias || null,
+      numElements: payload.numElements ?? nested.numElements ?? null,
+      eventProps: payload.eventProps || nested.eventProps || null,
+      consoleProps: payload.consoleProps || nested.consoleProps || null,
+      identity: extractStepIdentity(event)
     };
   }
 
   const allEvents = Array.isArray(events) ? events : [];
+  const allVideos = Array.isArray(mediaPayload?.videos) ? mediaPayload.videos : [];
   let activeEvents = allEvents.slice();
   let playbackTimer = null;
   let modalOpen = false;
+  let activeSpecKey = '__all__';
+  let visualMode = allVideos.length ? 'video' : 'dom';
+  let activeVideo = null;
   let currentViewport = { width: 1280, height: 720, url: '' };
+  let manualInspectorSelection = null;
+  let frameInteractionToken = 0;
+
+  if (visualSourceSelect) {
+    if (!allVideos.length) {
+      visualMode = 'dom';
+      visualSourceSelect.value = 'dom';
+      const videoOption = visualSourceSelect.querySelector('option[value="video"]');
+      if (videoOption) videoOption.textContent = 'Video (unavailable)';
+      visualSourceSelect.disabled = true;
+    } else {
+      visualSourceSelect.value = visualMode;
+    }
+  }
 
   function stopPlayback() {
     if (playbackTimer) {
@@ -423,6 +572,127 @@ function initReplayPage() {
     return scoped;
   }
 
+  function toMillis(value) {
+    if (value == null) return null;
+    const n = Date.parse(String(value));
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function getSpecMetaFromKey(key) {
+    if (!key || key === '__all__') return { specRunId: null, specPath: null };
+    if (key.startsWith('run:')) return { specRunId: key.slice(4), specPath: null };
+    if (key.startsWith('path:')) return { specRunId: null, specPath: key.slice(5) };
+    return { specRunId: null, specPath: null };
+  }
+
+  function pickVideoForSpec(key) {
+    if (!allVideos.length) return null;
+    const { specRunId, specPath } = getSpecMetaFromKey(key);
+
+    if (specRunId) {
+      const exact = allVideos.find((video) => firstNonEmpty(video?.specRunId) === specRunId);
+      if (exact) return exact;
+    }
+
+    if (specPath) {
+      const byPath = allVideos.find((video) => firstNonEmpty(video?.specPath) === specPath);
+      if (byPath) return byPath;
+    }
+
+    return allVideos[0] || null;
+  }
+
+  function resolveSpecStartMillis(eventsSubset, key) {
+    const { specRunId, specPath } = getSpecMetaFromKey(key);
+    for (const event of eventsSubset) {
+      const e = asObject(event);
+      const payload = asObject(e.payload);
+      const nested = asObject(payload.payload);
+      const type = firstNonEmpty(e.type, payload.type, nested.type).toLowerCase();
+      if (!type.startsWith('replay.spec.started')) continue;
+
+      const eventSpecRunId = firstNonEmpty(e.specRunId, payload.specRunId, payload.spec_run_id, nested.specRunId, nested.spec_run_id);
+      const eventSpecPath = firstNonEmpty(e.specPath, payload.specPath, payload.spec_path, nested.specPath, nested.spec_path, e.title);
+
+      if (specRunId && eventSpecRunId && eventSpecRunId !== specRunId) continue;
+      if (!specRunId && specPath && eventSpecPath && eventSpecPath !== specPath) continue;
+
+      const ts = toMillis(firstNonEmpty(e.ts, payload.ts, nested.ts, payload.startedAt, nested.startedAt));
+      if (ts != null) return ts;
+    }
+
+    for (const event of eventsSubset) {
+      const e = asObject(event);
+      const payload = asObject(e.payload);
+      const nested = asObject(payload.payload);
+      const ts = toMillis(firstNonEmpty(e.ts, payload.ts, nested.ts));
+      if (ts != null) return ts;
+    }
+
+    return null;
+  }
+
+  function syncVideoToEvent(event, key) {
+    if (!activeVideo || !videoNode || visualMode !== 'video') return;
+
+    const e = asObject(event);
+    const payload = asObject(e.payload);
+    const nested = asObject(payload.payload);
+    const eventMillis = toMillis(firstNonEmpty(e.ts, payload.ts, nested.ts));
+    const specStartMillis = resolveSpecStartMillis(activeEvents, key || activeSpecKey);
+
+    if (eventMillis == null || specStartMillis == null) return;
+
+    const targetSeconds = Math.max(0, (eventMillis - specStartMillis) / 1000);
+
+    const applySeek = () => {
+      const duration = Number(videoNode.duration);
+      const cap = Number.isFinite(duration) && duration > 0 ? Math.max(0, duration - 0.05) : null;
+      const seekTo = cap == null ? targetSeconds : Math.min(targetSeconds, cap);
+      if (Number.isFinite(seekTo)) {
+        try {
+          if (Math.abs((videoNode.currentTime || 0) - seekTo) > 0.25) videoNode.currentTime = seekTo;
+        } catch {
+          // ignore seek errors
+        }
+      }
+    };
+
+    if (Number.isFinite(videoNode.duration) && videoNode.duration > 0) applySeek();
+    else videoNode.addEventListener('loadedmetadata', applySeek, { once: true });
+  }
+
+  function applyVisualMode(event, key) {
+    const hasVideo = Boolean(activeVideo && activeVideo.url);
+    const useVideo = visualMode === 'video' && hasVideo;
+
+    if (useVideo) {
+      if (frame) frame.style.display = 'none';
+      if (videoNode) {
+        videoNode.style.display = 'block';
+        if (videoNode.dataset.src !== String(activeVideo.url)) {
+          videoNode.src = String(activeVideo.url);
+          videoNode.dataset.src = String(activeVideo.url);
+        }
+      }
+      if (visualMetaNode) {
+        const label = firstNonEmpty(activeVideo?.specPath, activeVideo?.specRunId, 'run-level');
+        visualMetaNode.textContent = `Visual source: video (${label})`; 
+      }
+      syncVideoToEvent(event, key);
+      return;
+    }
+
+    if (videoNode) {
+      videoNode.style.display = 'none';
+      if (videoNode.dataset.src) {
+        try { videoNode.pause(); } catch {}
+      }
+    }
+    if (frame) frame.style.display = 'block';
+    if (visualMetaNode) visualMetaNode.textContent = 'Visual source: DOM snapshot (best effort)';
+  }
+
   function isFailureEvent(event) {
     const e = asObject(event);
     const payload = asObject(e.payload);
@@ -439,10 +709,10 @@ function initReplayPage() {
     const nested = asObject(payload.payload);
     const type = firstNonEmpty(e.type, payload.type, nested.type, 'replay.event').toLowerCase();
     if (isFailureEvent(event)) return 'failure';
-    if (type.startsWith('replay.command')) return 'command';
+    if (type.startsWith('replay.cypress.command.log') || type.startsWith('replay.command')) return 'command';
     if (type.startsWith('replay.network')) return 'network';
     if (type.startsWith('replay.console')) return 'console';
-    if (type.startsWith('replay.log')) return 'log';
+    if (type.startsWith('replay.cypress.log') || type.startsWith('replay.log')) return 'log';
     return 'event';
   }
 
@@ -488,17 +758,43 @@ function initReplayPage() {
       const nested = asObject(payload.payload);
       const typeLabel = firstNonEmpty(e.type, payload.type, nested.type, 'replay.event');
       const typeShort = String(typeLabel).replace(/^replay\./, '');
-      const commandLabel = firstNonEmpty(e.command, payload.command, payload.name, nested.command, nested.name);
-      const titleLabel = firstNonEmpty(e.title, commandLabel, typeShort, 'event');
+      const commandLabel = firstNonEmpty(
+        payload.displayName,
+        payload.name,
+        e.title,
+        e.command,
+        payload.command,
+        nested.displayName,
+        nested.name,
+        nested.command,
+        typeShort,
+        'event'
+      );
       const detailLabel = firstNonEmpty(e.detail, payload.message, nested.message, payload.detail, nested.detail);
       const when = safeIso(e.ts || payload.ts || nested.ts);
       const kind = classifyReplayEvent(event);
+      const domMeta = extractDomMeta(event);
+      const target = extractTarget(event);
+      const identity = extractStepIdentity(event);
 
-      return `<button type="button" data-step="${idx}" class="button button-secondary replay-step-button replay-step-kind-${escapeHtmlInline(kind)}">
+      const stateRaw = firstNonEmpty(payload.state, nested.state, payload.status, nested.status);
+      const state = String(stateRaw || '').toLowerCase();
+      const stateClass = state.includes('fail') || kind === 'failure'
+        ? 'failed'
+        : (state.includes('pass') || state.includes('success')
+          ? 'passed'
+          : (state.includes('pending') ? 'pending' : 'unknown'));
+      const degraded = domMeta.degraded || !extractDom(event) || !target.primary;
+      const identityLabel = identity.stepId || identity.eventId || '';
+
+      return `<button type="button" data-step="${idx}" class="button button-secondary replay-step-button replay-step-kind-${escapeHtmlInline(kind)} replay-step-state-${escapeHtmlInline(stateClass)}">
         <span class="replay-step-index">${idx + 1}</span>
         <span class="replay-step-body">
-          <strong class="replay-step-command">${escapeHtmlInline(titleLabel)}</strong>
-          <small class="replay-step-meta-line">${escapeHtmlInline(typeShort)}${detailLabel ? ` · ${escapeHtmlInline(String(detailLabel).slice(0, 120))}` : ''} · ${escapeHtmlInline(when)}</small>
+          <span class="replay-step-command-row">
+            <span class="replay-step-state-dot replay-step-state-dot-${escapeHtmlInline(stateClass)}"></span>
+            <strong class="replay-step-command">${escapeHtmlInline(String(commandLabel).slice(0, 180))}</strong>
+          </span>
+          <small class="replay-step-meta-line">${escapeHtmlInline(typeShort)}${detailLabel ? ` · ${escapeHtmlInline(String(detailLabel).slice(0, 160))}` : ''} · ${escapeHtmlInline(when)}${identityLabel ? ` · ${escapeHtmlInline(String(identityLabel).slice(0, 72))}` : ''}${degraded ? ' · degraded' : ''}</small>
         </span>
       </button>`;
     }).join('');
@@ -511,6 +807,173 @@ function initReplayPage() {
       });
     }
   }
+
+  function clearFrameHighlight() {
+    try {
+      const doc = frame.contentDocument;
+      if (!doc) return;
+      const priorNodes = Array.from(doc.querySelectorAll('[data-testharbor-highlight="true"]'));
+      for (const prior of priorNodes) {
+        prior.removeAttribute('data-testharbor-highlight');
+        prior.style.outline = '';
+        prior.style.outlineOffset = '';
+        prior.style.backgroundColor = '';
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function findTargetInFrame(target) {
+    if (!target || !target.primary) return { element: null, reason: 'missing_target_metadata' };
+    try {
+      const doc = frame.contentDocument;
+      if (!doc) return { element: null, reason: 'iframe_document_unavailable' };
+      const primary = asObject(target.primary);
+      const selectors = Array.isArray(primary.preferredSelectors) ? primary.preferredSelectors : [];
+      for (const selector of selectors) {
+        if (!selector) continue;
+        try {
+          const found = doc.querySelector(selector);
+          if (found) return { element: found, reason: null };
+        } catch {
+          // ignore invalid selectors
+        }
+      }
+      if (primary.id) {
+        const foundById = doc.getElementById(primary.id);
+        if (foundById) return { element: foundById, reason: null };
+      }
+      const attrs = asObject(primary.attributes);
+      for (const attrName of ['data-cy', 'data-testid', 'data-test', 'name', 'aria-label']) {
+        const attrValue = attrs[attrName];
+        if (!attrValue) continue;
+        const found = doc.querySelector(`[${attrName}="${String(attrValue).replace(/"/g, '\\"')}"]`);
+        if (found) return { element: found, reason: null };
+      }
+      if (primary.tagName && primary.textPreview) {
+        const candidates = Array.from(doc.querySelectorAll(primary.tagName)).slice(0, 100);
+        const normalizedTargetText = String(primary.textPreview).trim();
+        const match = candidates.find((node) => String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim().includes(normalizedTargetText));
+        if (match) return { element: match, reason: null };
+      }
+      return { element: null, reason: 'selector_not_found_in_snapshot' };
+    } catch {
+      return { element: null, reason: 'iframe_access_failed' };
+    }
+  }
+
+  function applyFrameHighlight(target) {
+    clearFrameHighlight();
+    const located = findTargetInFrame(target);
+    if (!located.element) return located;
+    const element = located.element;
+    element.setAttribute('data-testharbor-highlight', 'true');
+    element.style.outline = '3px solid rgba(191, 79, 47, 0.92)';
+    element.style.outlineOffset = '2px';
+    element.style.backgroundColor = 'rgba(255, 214, 102, 0.28)';
+    try {
+      element.scrollIntoView({ block: 'center', inline: 'center' });
+    } catch {
+      // ignore
+    }
+    return located;
+  }
+
+  function highlightManualElement(element) {
+    if (!element) return;
+    clearFrameHighlight();
+    element.setAttribute('data-testharbor-highlight', 'true');
+    element.style.outline = '3px solid rgba(31, 78, 121, 0.92)';
+    element.style.outlineOffset = '2px';
+    element.style.backgroundColor = 'rgba(125, 211, 252, 0.22)';
+  }
+
+  function renderInspector(event, located) {
+    const payload = asObject(event.payload);
+    const nested = asObject(payload.payload);
+    const domMeta = extractDomMeta(event);
+    const target = extractTarget(event);
+    const identity = extractStepIdentity(event);
+    const warnings = [];
+    const exactDomAtStep = Boolean(extractDom(event));
+
+    if (!exactDomAtStep) {
+      warnings.push('No exact DOM snapshot was captured for this step.');
+    }
+    if (domMeta.degraded) warnings.push(`DOM capture degraded: ${firstNonEmpty(domMeta.degradedReason, 'unspecified reason')}.`);
+    if (!target.primary) warnings.push('No target element metadata was captured for this step.');
+    if (target.primary && !located.element) warnings.push(`Target could not be located in the rendered snapshot: ${firstNonEmpty(located.reason, 'unknown_reason')}.`);
+
+    if (warnings.length) {
+      warningNode.style.display = 'block';
+      warningNode.innerHTML = `<strong>Degraded fidelity</strong><p>${escapeHtmlInline(warnings.join(' '))}</p>`;
+    } else {
+      warningNode.style.display = 'none';
+      warningNode.textContent = '';
+    }
+
+    const summaryBits = [
+      firstNonEmpty(payload.displayName, payload.name, event.title, event.command, event.type, 'step'),
+      firstNonEmpty(payload.status, payload.state, nested.status, nested.state),
+      identity.stepId ? `step ${identity.stepId}` : '',
+      identity.phase ? `phase ${identity.phase}` : ''
+    ].filter(Boolean);
+    elementStatusNode.textContent = manualInspectorSelection
+      ? 'Manual inspect'
+      : (warnings.length ? 'Degraded' : (located.element ? 'Located in iframe' : 'Captured'));
+    elementSummaryNode.innerHTML = `<p><strong>${escapeHtmlInline(summaryBits.join(' · ') || 'Selected step')}</strong></p>
+      <p>${escapeHtmlInline(firstNonEmpty(event.detail, payload.message, nested.message, 'No detail captured'))}</p>`
+      + (manualInspectorSelection
+        ? `<p><strong>Manual selection:</strong> ${escapeHtmlInline(firstNonEmpty(manualInspectorSelection.selectorPath, manualInspectorSelection.tagName, 'element'))}</p>`
+        : '');
+
+    const inspectorPayload = {
+      identity,
+      target,
+      domCapture: domMeta,
+      located: {
+        found: Boolean(located.element),
+        reason: located.reason || null
+      },
+      timing: {
+        ts: firstNonEmpty(event.ts, payload.ts, nested.ts),
+        wallClockStartedAt: firstNonEmpty(payload.wallClockStartedAt, nested.wallClockStartedAt),
+        wallClockEndedAt: firstNonEmpty(payload.wallClockEndedAt, nested.wallClockEndedAt),
+        elapsedMs: payload.elapsedMs ?? nested.elapsedMs ?? null
+      },
+      runner: {
+        aliases: payload.aliases || nested.aliases || null,
+        numElements: payload.numElements ?? nested.numElements ?? null,
+        eventProps: payload.eventProps || nested.eventProps || null,
+        consoleProps: payload.consoleProps || nested.consoleProps || null
+      },
+      manualSelection: manualInspectorSelection
+    };
+    elementMetaNode.textContent = JSON.stringify(inspectorPayload, null, 2);
+  }
+
+  function bindFrameInspection(event, located) {
+    frameInteractionToken += 1;
+    const token = frameInteractionToken;
+
+    try {
+      const doc = frame.contentDocument;
+      if (!doc) return;
+      doc.onclick = (clickEvent) => {
+        if (token !== frameInteractionToken) return;
+        const selected = clickEvent.target;
+        if (!selected || selected.nodeType !== 1) return;
+        clickEvent.preventDefault();
+        manualInspectorSelection = serializeInspectorElement(selected);
+        highlightManualElement(selected);
+        renderInspector(event, located);
+      };
+    } catch {
+      // ignore iframe inspection binding failures
+    }
+  }
+
 
   function renderCurrent() {
     const rawIdx = Number(slider.value || 0);
@@ -529,31 +992,45 @@ function initReplayPage() {
 
     const viewport = extractViewport(event);
     currentViewport = viewport;
+    manualInspectorSelection = null;
 
-    const domRef = findDomAtOrBefore(idx);
-    const domSourceEvent = domRef ? getEvent(domRef.index) : event;
-    const domBaseUrl = resolveEventUrl(domSourceEvent) || viewport.url || '';
-    const sanitizedDom = domRef && domRef.dom ? sanitizeSnapshotHtml(domRef.dom, domBaseUrl) : '';
+    const exactDom = extractDom(event);
+    const domBaseUrl = resolveEventUrl(event) || viewport.url || '';
+    const sanitizedDom = exactDom ? sanitizeSnapshotHtml(exactDom, domBaseUrl) : '';
 
     if (sanitizedDom) {
       frame.srcdoc = String(sanitizedDom);
     } else {
       const payloadPreview = JSON.stringify(payload && Object.keys(payload).length ? payload : event, null, 2);
       frame.srcdoc = '<html><body style="font-family:system-ui, sans-serif; padding:16px; color:#111827;">'
-        + '<h3>No DOM snapshot available for this range</h3>'
+        + '<h3>Exact-step DOM unavailable</h3>'
         + '<p><strong>Type:</strong> ' + escapeHtmlInline(eventType) + '</p>'
         + '<p><strong>Title:</strong> ' + escapeHtmlInline(eventTitle) + '</p>'
         + '<p><strong>Detail:</strong> ' + escapeHtmlInline(eventDetail) + '</p>'
-        + (domBaseUrl ? '<p><strong>Last page URL:</strong> ' + escapeHtmlInline(domBaseUrl) + '</p>' : '')
+        + (domBaseUrl ? '<p><strong>Page URL:</strong> ' + escapeHtmlInline(domBaseUrl) + '</p>' : '')
+        + '<p>This step has no exact DOM snapshot, so the replay viewer cannot render a precise iframe state for it.</p>'
         + '<pre style="white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;">'
         + escapeHtmlInline(String(payloadPreview).slice(0, 12000))
         + '</pre>'
         + '</body></html>';
     }
 
+    applyVisualMode(event, activeSpecKey);
+
     const fitNow = () => fitFrameToStage(currentViewport);
-    frame.onload = fitNow;
-    window.requestAnimationFrame(fitNow);
+    const renderFrameState = () => {
+      const located = applyFrameHighlight(extractTarget(event));
+      fitNow();
+      if (!extractDom(event)) clearFrameHighlight();
+      if (extractDom(event)) bindFrameInspection(event, located);
+      renderInspector(event, located);
+    };
+    frame.onload = renderFrameState;
+    if (videoNode) {
+      videoNode.onloadedmetadata = fitNow;
+      videoNode.onloadeddata = fitNow;
+    }
+    window.requestAnimationFrame(renderFrameState);
 
     const consoleData = collectUpTo(idx, extractConsole, 250);
     const networkData = collectUpTo(idx, extractNetwork, 250);
@@ -570,7 +1047,13 @@ function initReplayPage() {
     runnerNode.textContent = runnerData.length
       ? runnerData.map((line) => {
         const row = asObject(line);
-        return `${safeIso(row.ts)} | ${firstNonEmpty(row.type, 'replay.event')} | ${firstNonEmpty(row.title, 'n/a')}${row.detail ? ` | ${row.detail}` : ''}`;
+        const extra = [
+          firstNonEmpty(row.status),
+          row.numElements != null ? `numElements=${row.numElements}` : '',
+          row.identity && row.identity.stepId ? `step=${row.identity.stepId}` : '',
+          row.identity && row.identity.phase ? `phase=${row.identity.phase}` : ''
+        ].filter(Boolean).join(' | ');
+        return `${safeIso(row.ts)} | ${firstNonEmpty(row.type, 'replay.event')} | ${firstNonEmpty(row.title, 'n/a')}${row.detail ? ` | ${row.detail}` : ''}${extra ? ` | ${extra}` : ''}`;
       }).join('\n')
       : `No runner log payload up to this step (${idx + 1}).`;
 
@@ -583,8 +1066,15 @@ function initReplayPage() {
 
   function applySpecSelection(key, keepPosition) {
     const selectedKey = key || '__all__';
+    activeSpecKey = selectedKey;
     activeEvents = eventsForSpec(selectedKey);
     if (!activeEvents.length) activeEvents = allEvents.slice();
+
+    activeVideo = pickVideoForSpec(selectedKey);
+    if (visualMode === 'video' && !activeVideo) {
+      visualMode = 'dom';
+      if (visualSourceSelect) visualSourceSelect.value = 'dom';
+    }
 
     slider.max = String(Math.max(0, activeEvents.length - 1));
     if (keepPosition) {
@@ -647,6 +1137,19 @@ function initReplayPage() {
     speedSelect.addEventListener('change', () => {
       if (playbackTimer) stopPlayback();
     });
+
+    if (visualSourceSelect) {
+      visualSourceSelect.addEventListener('change', () => {
+        const nextMode = String(visualSourceSelect.value || 'dom');
+        if (nextMode === 'video' && !activeVideo) {
+          visualMode = 'dom';
+          visualSourceSelect.value = 'dom';
+        } else {
+          visualMode = nextMode;
+        }
+        renderCurrent();
+      });
+    }
 
     const setModalOpen = (next) => {
       if (!replayShell || !modalToggleButton) return;

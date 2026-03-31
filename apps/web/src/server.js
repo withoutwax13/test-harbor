@@ -189,6 +189,38 @@ async function apiFetch(pathname, { method = 'GET', token = '', body = null } = 
   return payload;
 }
 
+async function apiFetchReplayBundle(runId, token, { pageLimit = 5000, maxPages = 100 } = {}) {
+  const normalizedRunId = String(runId || '').trim();
+  const allEvents = [];
+  let cursor = '';
+  let pages = 0;
+  let firstPage = null;
+  let hasMore = true;
+
+  while (hasMore && pages < maxPages) {
+    const params = new URLSearchParams({ limit: String(pageLimit) });
+    if (cursor) params.set('cursor', cursor);
+    const page = await apiFetch(`/v1/runs/${normalizedRunId}/replay?${params.toString()}`, { token });
+    if (!firstPage) firstPage = page;
+    allEvents.push(...(Array.isArray(page?.events) ? page.events : []));
+    hasMore = page?.pageInfo?.hasMore === true;
+    cursor = hasMore ? String(page?.pageInfo?.nextCursor || '') : '';
+    pages += 1;
+  }
+
+  return {
+    ...(firstPage || {}),
+    events: allEvents,
+    pageInfo: {
+      ...(firstPage?.pageInfo || {}),
+      returned: allEvents.length,
+      hasMore,
+      nextCursor: hasMore ? cursor || null : null,
+      truncated: hasMore || pages >= maxPages || Boolean(firstPage?.pageInfo?.truncated)
+    }
+  };
+}
+
 async function apiFetchRaw(pathname, { method = 'GET', token = '', headers = {}, body } = {}) {
   return fetch(`${API_BASE_URL}${pathname}`, {
     method,
@@ -1005,7 +1037,15 @@ function renderRunReplayPage(shell, replayDetail, runId) {
       ? payload.network
       : (Array.isArray(nestedPayload.network) ? nestedPayload.network : asArray(payload.network).filter(Boolean));
 
-    const domSnapshot = firstText(payload.domSnapshot, nestedPayload.domSnapshot) || null;
+    const domSnapshot = firstText(
+      row?.dom_snapshot,
+      payload.domSnapshot,
+      payload.domCapture?.html,
+      nestedPayload.domSnapshot,
+      nestedPayload.domCapture?.html
+    ) || null;
+    const target = asObject(payload.target || payload.targetElement || nestedPayload.target || nestedPayload.targetElement);
+    const domCapture = asObject(payload.domCapture || nestedPayload.domCapture);
 
     return {
       id: row?.id,
@@ -1014,6 +1054,12 @@ function renderRunReplayPage(shell, replayDetail, runId) {
       title: firstText(payload.title, payload.name, nestedPayload.title, nestedPayload.name) || null,
       detail: firstText(payload.detail, payload.message, nestedPayload.detail, nestedPayload.message) || null,
       command: firstText(payload.command, nestedPayload.command) || null,
+      status: firstText(payload.status, payload.state, nestedPayload.status, nestedPayload.state) || null,
+      eventId: firstText(row?.event_id, payload.eventId, nestedPayload.eventId) || null,
+      eventSeq: Number(payload.eventSeq ?? nestedPayload.eventSeq ?? row?.event_seq ?? 0) || null,
+      stepId: firstText(row?.step_id, payload.stepId, nestedPayload.stepId) || null,
+      phase: firstText(row?.phase, payload.phase, nestedPayload.phase) || null,
+      captureStatus: firstText(row?.capture_status, payload.captureStatus, nestedPayload.captureStatus) || null,
       specRunId: firstText(row?.spec_run_id, payload.specRunId, nestedPayload.specRunId) || null,
       specPath: firstText(payload.specPath, nestedPayload.specPath) || null,
       testResultId: firstText(row?.test_result_id, payload.testResultId, nestedPayload.testResultId) || null,
@@ -1021,10 +1067,31 @@ function renderRunReplayPage(shell, replayDetail, runId) {
       console: consoleItems,
       network: networkItems,
       domSnapshot,
+      domCapture,
+      target,
       payload,
       nestedPayload
     };
   });
+
+  const artifacts = Array.isArray(replayDetail?.artifacts) ? replayDetail.artifacts : [];
+  const replayVideos = artifacts
+    .filter((artifact) => {
+      const type = String(artifact?.type || '').toLowerCase();
+      const contentType = String(artifact?.content_type || '').toLowerCase();
+      const hasContent = artifact?.has_content === true;
+      return hasContent && (type.includes('video') || contentType.startsWith('video/'));
+    })
+    .map((artifact) => ({
+      id: artifact.id,
+      type: artifact.type || 'video',
+      contentType: artifact.content_type || 'video/mp4',
+      createdAt: artifact.created_at || null,
+      specRunId: artifact.spec_run_id || null,
+      testResultId: artifact.test_result_id || null,
+      specPath: null,
+      url: `/app/artifacts/${artifact.id}/content`
+    }));
 
   const extractConsole = (event) => {
     if (!event || typeof event !== 'object') return [];
@@ -1079,15 +1146,6 @@ function renderRunReplayPage(shell, replayDetail, runId) {
     return values.length > limit ? values.slice(values.length - limit) : values;
   };
 
-  const findDomAtOrBefore = (index) => {
-    const safeIndex = Math.min(Math.max(Number(index) || 0, 0), Math.max(normalized.length - 1, 0));
-    for (let i = safeIndex; i >= 0; i -= 1) {
-      const dom = extractDom(normalized[i]);
-      if (dom) return { dom, index: i };
-    }
-    return null;
-  };
-
   const computeInitialIndex = () => {
     if (!normalized.length) return 0;
     let bestIndex = normalized.length - 1;
@@ -1108,8 +1166,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
 
   const initialIndex = computeInitialIndex();
   const initialEvent = normalized[initialIndex] || null;
-  const initialDomRef = findDomAtOrBefore(initialIndex);
-  const initialDomSnapshot = initialDomRef?.dom || null;
+  const initialDomSnapshot = initialEvent ? extractDom(initialEvent) : null;
   const initialConsoleEvents = collectUpTo(initialIndex, extractConsole, 200);
   const initialNetworkEvents = collectUpTo(initialIndex, extractNetwork, 200);
   const initialRunnerLines = collectUpTo(initialIndex, extractRunnerLine, 300);
@@ -1128,7 +1185,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
       <p>Try moving the slider to steps near <code>replay.dom.snapshot</code> events.</p>
     </body></html>`;
 
-  const initialDomSrcDoc = initialDomFallback;
+  const initialDomSrcDoc = initialDomSnapshot || initialDomFallback;
   const initialReplayTitle = initialEvent
     ? `${initialEvent.type || 'replay.event'} @ ${formatDate(initialEvent.ts)}`
     : '';
@@ -1172,10 +1229,15 @@ function renderRunReplayPage(shell, replayDetail, runId) {
   }).join('');
 
   const replayJsonBase64 = Buffer.from(JSON.stringify(normalized), 'utf8').toString('base64');
+  const replayMediaBase64 = Buffer.from(JSON.stringify({ videos: replayVideos }), 'utf8').toString('base64');
 
   const consoleEntryCount = normalized.reduce((n, event) => n + extractConsole(event).length, 0);
   const networkEntryCount = normalized.reduce((n, event) => n + extractNetwork(event).length, 0);
   const domEntryCount = normalized.reduce((n, event) => n + (extractDom(event) ? 1 : 0), 0);
+  const degradedStepCount = normalized.reduce((n, event) => {
+    const domMeta = event?.domCapture || event?.payload?.domCapture || {};
+    return n + ((domMeta.degraded || !extractDom(event) || !Object.keys(event?.target || {}).length) ? 1 : 0);
+  }, 0);
   const replaySpecCount = new Set(normalized.map((event) => firstText(event?.specRunId, event?.specPath)).filter(Boolean)).size;
 
   return renderLayout({
@@ -1186,14 +1248,15 @@ function renderRunReplayPage(shell, replayDetail, runId) {
         <div>
           <p class="eyebrow">Replay</p>
           <h2>Run ${escapeHtml(runId)} replay</h2>
-          <p>Step through Cypress runner events with cumulative console/network logs and nearest DOM snapshots.</p>
+          <p>Step through Cypress runner events with cumulative console/network logs and exact-step DOM snapshots when available.</p>
         </div>
         <div class="hero-metrics">
           ${summaryCard('Captured events', String(normalized.length), normalized.length ? `From ${formatDate(normalized[0]?.ts)} to ${formatDate(normalized.at(-1)?.ts)}` : 'No replay events yet')}
           ${summaryCard('Spec attempts', String(replaySpecCount), replaySpecCount ? 'Selectable in replay toolbar' : 'No spec-level metadata yet')}
           ${summaryCard('Console entries', String(consoleEntryCount), 'Cumulative up to selected step')}
           ${summaryCard('Network entries', String(networkEntryCount), 'Cumulative up to selected step')}
-          ${summaryCard('DOM snapshots', String(domEntryCount), 'Nearest snapshot rendered for each step')}
+          ${summaryCard('DOM snapshots', String(domEntryCount), 'Exact-step snapshots captured by the reporter')}
+          ${summaryCard('Degraded steps', String(degradedStepCount), degradedStepCount ? 'Explicitly flagged in inspector UI' : 'All visible steps include DOM + target metadata')}
         </div>
       </section>
       <section class="panel">
@@ -1219,6 +1282,13 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               </select>
             </label>
             <div class="row-actions" style="align-items:flex-end; justify-content:flex-end;">
+              <label style="min-width: 170px;">
+                Visual source
+                <select id="replay-visual-source">
+                  <option value="video">Video (exact visual)</option>
+                  <option value="dom">DOM snapshot</option>
+                </select>
+              </label>
               <button type="button" class="button button-secondary" id="replay-play-pause">Play</button>
               <button type="button" class="button button-secondary" id="replay-step-prev">Prev</button>
               <button type="button" class="button button-secondary" id="replay-step-next">Next</button>
@@ -1233,12 +1303,17 @@ function renderRunReplayPage(shell, replayDetail, runId) {
             </div>
             <div class="panel replay-column replay-column-center">
               <div class="panel-header compact"><strong>Application under test</strong><small id="replay-event-title">${escapeHtml(initialReplayTitle)}</small></div>
+              <div id="replay-step-warning" class="empty-state" style="display:none;"></div>
               <div id="replay-frame-stage" class="replay-frame-stage">
+                <video id="replay-video" class="replay-aut-media" controls preload="metadata" style="display:none;"></video>
                 <iframe id="replay-frame" sandbox="allow-same-origin" referrerpolicy="no-referrer" srcdoc="${escapeHtml(initialDomSrcDoc)}"></iframe>
               </div>
-              <small class="replay-fit-note">Auto-fit keeps the full viewport visible at each step.</small>
+              <small id="replay-visual-meta" class="replay-fit-note">Auto-fit keeps the full viewport visible at each step.</small>
             </div>
             <div class="panel replay-column replay-column-right">
+              <div class="panel-header compact"><strong>Element Inspector</strong><small id="replay-element-status">Waiting for step selection</small></div>
+              <div id="replay-element-summary" class="empty-state"><p>Select a step to inspect target element metadata and replay fidelity.</p></div>
+              <pre id="replay-element-meta" class="code-block replay-side-log">No target metadata yet.</pre>
               <div class="panel-header compact"><strong>Console (cumulative)</strong></div>
               <pre id="replay-console" class="code-block replay-side-log">${escapeHtml(initialConsoleText)}</pre>
               <div class="panel-header compact"><strong>Network (cumulative)</strong></div>
@@ -1249,7 +1324,8 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           </div>
         </div>` : '<div class="empty-state"><h3>No replay events found</h3><p>Enable replay hooks in your Cypress support file to capture DOM/network/console data, then rerun tests.</p></div>'}
       </section>
-      <script id="replay-data" type="text/plain">${replayJsonBase64}</script>`
+      <script id="replay-data" type="text/plain">${replayJsonBase64}</script>
+      <script id="replay-media-data" type="text/plain">${replayMediaBase64}</script>`
   });
 }
 
@@ -1935,8 +2011,17 @@ app.get('/app/runs/:id/replay', async (request, reply) => {
   const shell = await loadShellData(request);
   if (!shell.session) return requireSession(request, reply);
 
-  const replay = await apiFetch(`/v1/runs/${request.params.id}/replay`, { token: shell.session.token });
-  return reply.type('text/html').send(renderRunReplayPage(shell, replay, request.params.id));
+  const [replay, runDetail] = await Promise.all([
+    apiFetchReplayBundle(request.params.id, shell.session.token),
+    apiFetch(`/v1/runs/${request.params.id}`, { token: shell.session.token })
+  ]);
+
+  const replayBundle = {
+    ...replay,
+    artifacts: Array.isArray(runDetail?.artifacts) ? runDetail.artifacts : []
+  };
+
+  return reply.type('text/html').send(renderRunReplayPage(shell, replayBundle, request.params.id));
 });
 
 app.get('/app/artifacts/:id/content', async (request, reply) => {

@@ -12,7 +12,8 @@ for file in \
   infra/db/migrations/005_batches_11_18.sql \
   infra/db/migrations/006_batches_19_26.sql \
   infra/db/migrations/007_project_ingest_tokens.sql \
-  infra/db/migrations/008_artifact_blobs_replay.sql
+  infra/db/migrations/008_artifact_blobs_replay.sql \
+  infra/db/migrations/009_replay_event_ordering.sql
 
 do
   echo "Applying $file ..."

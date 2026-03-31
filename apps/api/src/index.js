@@ -161,6 +161,36 @@ function buildPageInfo(total, page, limit) {
   };
 }
 
+const REPLAY_CURSOR_VERSION = 1;
+const REPLAY_NULL_SEQ_SORT = Number.MAX_SAFE_INTEGER;
+
+function encodeReplayCursor(cursor) {
+  return Buffer.from(JSON.stringify({
+    v: REPLAY_CURSOR_VERSION,
+    sortSeq: Number(cursor?.sortSeq ?? REPLAY_NULL_SEQ_SORT),
+    seq: cursor?.seq ?? null,
+    id: Number(cursor?.id || 0)
+  }), 'utf8').toString('base64url');
+}
+
+function decodeReplayCursor(value) {
+  if (!value) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8'));
+    if (Number(decoded?.v) !== REPLAY_CURSOR_VERSION) return null;
+    const id = Number(decoded?.id);
+    const sortSeq = Number(decoded?.sortSeq);
+    if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(sortSeq)) return null;
+    return {
+      id: Math.trunc(id),
+      sortSeq: Math.trunc(sortSeq),
+      seq: decoded?.seq == null ? null : Math.trunc(Number(decoded.seq))
+    };
+  } catch {
+    return null;
+  }
+}
+
 function deterministicUnit(seed, key) {
   const hex = hashText(`${seed}:${key}`).slice(0, 12);
   return Number.parseInt(hex, 16) / 0xffffffffffff;
@@ -2323,20 +2353,54 @@ app.get('/v1/artifacts/download/:id', async (request, reply) => {
 
 app.get('/v1/runs/:id/replay', { preHandler: workspaceGuard({ role: 'viewer', resolveWorkspaceId: 'runParam' }) }, async (request, reply) => {
   const { id } = request.params;
-  const { limit = 2000 } = request.query || {};
+  const { limit = 2000, cursor = '' } = request.query || {};
   const normalizedLimit = Math.max(1, Math.min(Number(limit) || 2000, 10000));
+  const decodedCursor = decodeReplayCursor(cursor);
+
+  if (cursor && !decodedCursor) {
+    return reply.code(400).send({ error: 'invalid_cursor' });
+  }
 
   const run = await fetchRun(id);
   if (!run) return reply.code(404).send({ error: 'not_found' });
 
+  const totalRes = await query(
+    `select count(*)::int as total
+     from replay_events
+     where run_id = $1`,
+    [id]
+  );
+
   const { rows } = await query(
-    `select id, run_id, spec_run_id, test_result_id, event_type, event_ts, payload, created_at
+    `select
+       id, run_id, spec_run_id, test_result_id, event_type, event_ts,
+       event_seq, event_id, step_id, phase, capture_status, payload, created_at
      from replay_events
      where run_id = $1
-     order by id asc
-     limit $2`,
-    [id, normalizedLimit]
+       and (
+         $2::bigint is null
+         or coalesce(event_seq, 9007199254740991::bigint) > $2
+         or (
+           coalesce(event_seq, 9007199254740991::bigint) = $2
+           and id > $3
+         )
+       )
+     order by coalesce(event_seq, 9007199254740991::bigint) asc, id asc
+     limit $4`,
+    [id, decodedCursor?.sortSeq ?? null, decodedCursor?.id ?? null, normalizedLimit + 1]
   );
+
+  const hasMore = rows.length > normalizedLimit;
+  const pageRows = hasMore ? rows.slice(0, normalizedLimit) : rows;
+  const lastRow = pageRows.at(-1) || null;
+  const nextCursor = hasMore && lastRow
+    ? encodeReplayCursor({
+        sortSeq: lastRow.event_seq == null ? REPLAY_NULL_SEQ_SORT : Number(lastRow.event_seq),
+        seq: lastRow.event_seq == null ? null : Number(lastRow.event_seq),
+        id: Number(lastRow.id)
+      })
+    : null;
+  const total = Number(totalRes.rows[0]?.total || 0);
 
   return {
     run: {
@@ -2347,10 +2411,14 @@ app.get('/v1/runs/:id/replay', { preHandler: workspaceGuard({ role: 'viewer', re
       branch: run.branch,
       commitSha: run.commit_sha
     },
-    events: rows,
+    events: pageRows,
     pageInfo: {
+      total,
       limit: normalizedLimit,
-      returned: rows.length
+      returned: pageRows.length,
+      hasMore,
+      nextCursor,
+      truncated: hasMore || Boolean(decodedCursor)
     }
   };
 });

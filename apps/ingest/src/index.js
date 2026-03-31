@@ -103,6 +103,63 @@ function decodeBase64Content(value) {
   }
 }
 
+function firstPresent() {
+  for (const value of arguments) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    return value;
+  }
+  return null;
+}
+
+function normalizeReplaySeq(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.trunc(parsed);
+}
+
+function normalizeReplayText(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text ? text : null;
+}
+
+function normalizeReplayCaptureStatus(event) {
+  const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {};
+  const domCapture = payload.domCapture && typeof payload.domCapture === 'object'
+    ? payload.domCapture
+    : (event?.domCapture && typeof event.domCapture === 'object' ? event.domCapture : {});
+
+  if (domCapture.exactForStep === true || typeof event?.domSnapshot === 'string' || typeof payload.domSnapshot === 'string') {
+    return 'exact';
+  }
+  if (domCapture.degraded === true) {
+    return 'degraded';
+  }
+  if (domCapture.available === false || firstPresent(event?.domSnapshot, payload.domSnapshot) == null) {
+    return 'unavailable';
+  }
+  return 'available';
+}
+
+function normalizeReplayEventRecord(chunkPayload, event) {
+  const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {};
+  return {
+    runId: chunkPayload.runId,
+    specRunId: firstPresent(event?.specRunId, payload.specRunId, chunkPayload.specRunId),
+    testResultId: firstPresent(event?.testResultId, payload.testResultId, chunkPayload.testResultId),
+    eventType: normalizeReplayText(firstPresent(event?.type, payload.type)) || 'replay.event',
+    eventTs: firstPresent(event?.ts, event?.at, payload.ts, payload.at, null),
+    eventSeq: normalizeReplaySeq(firstPresent(event?.eventSeq, payload.eventSeq, event?.seq, payload.seq)),
+    eventId: normalizeReplayText(firstPresent(event?.eventId, payload.eventId)),
+    stepId: normalizeReplayText(firstPresent(event?.stepId, payload.stepId)),
+    phase: normalizeReplayText(firstPresent(event?.phase, payload.phase)),
+    captureStatus: normalizeReplayCaptureStatus(event),
+    payload: JSON.stringify(event)
+  };
+}
+
 function sanitizePayloadForReceipt(type, payload) {
   if (!payload || typeof payload !== 'object') return payload;
 
@@ -125,6 +182,20 @@ function sanitizePayloadForReceipt(type, payload) {
       if (typeof out.domSnapshot === 'string') {
         out.domSnapshotLength = out.domSnapshot.length;
         out.domSnapshot = '[omitted]';
+      }
+      if (out.payload && typeof out.payload === 'object') {
+        out.payload = { ...out.payload };
+        if (typeof out.payload.domSnapshot === 'string') {
+          out.payload.domSnapshotLength = out.payload.domSnapshot.length;
+          out.payload.domSnapshot = '[omitted]';
+        }
+        if (out.payload.domCapture && typeof out.payload.domCapture === 'object' && typeof out.payload.domCapture.html === 'string') {
+          out.payload.domCapture = {
+            ...out.payload.domCapture,
+            htmlLength: out.payload.domCapture.html.length,
+            html: '[omitted]'
+          };
+        }
       }
       return out;
     });
@@ -477,16 +548,25 @@ async function handleEvent(type, payload) {
       const events = Array.isArray(payload.events) ? payload.events : [];
       for (const event of events) {
         if (!event || typeof event !== 'object') continue;
+        const normalizedEvent = normalizeReplayEventRecord(payload, event);
         await query(
-          `insert into replay_events(run_id, spec_run_id, test_result_id, event_type, event_ts, payload)
-           values($1,$2,$3,$4,coalesce($5::timestamptz, now()),$6::jsonb)`,
+          `insert into replay_events(
+             run_id, spec_run_id, test_result_id, event_type, event_ts,
+             event_seq, event_id, step_id, phase, capture_status, payload
+           )
+           values($1,$2,$3,$4,coalesce($5::timestamptz, now()),$6,$7,$8,$9,$10,$11::jsonb)`,
           [
-            payload.runId,
-            payload.specRunId ?? event.specRunId ?? null,
-            payload.testResultId ?? event.testResultId ?? null,
-            event.type || 'replay.event',
-            event.ts || event.at || null,
-            JSON.stringify(event)
+            normalizedEvent.runId,
+            normalizedEvent.specRunId,
+            normalizedEvent.testResultId,
+            normalizedEvent.eventType,
+            normalizedEvent.eventTs,
+            normalizedEvent.eventSeq,
+            normalizedEvent.eventId,
+            normalizedEvent.stepId,
+            normalizedEvent.phase,
+            normalizedEvent.captureStatus,
+            normalizedEvent.payload
           ]
         );
       }
