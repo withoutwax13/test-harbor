@@ -1147,11 +1147,28 @@ function renderRunReplayPage(shell, replayDetail, runId) {
 
   const initialStepListHtml = normalized.map((event, idx) => {
     const typeLabel = event?.type || 'replay.event';
-    const titleLabel = firstText(event?.title, event?.command, event?.detail);
+    const typeShort = String(typeLabel).replace(/^replay\./, '');
+    const titleLabel = firstText(event?.title, event?.command, event?.payload?.name, event?.payload?.command, event?.detail) || typeShort;
     const detailLabel = firstText(event?.detail, event?.payload?.message, event?.nestedPayload?.message);
-    const rowText = `${idx + 1}. ${typeLabel}${titleLabel ? ` · ${String(titleLabel).slice(0, 80)}` : ''}${detailLabel ? ` — ${String(detailLabel).slice(0, 80)}` : ''} · ${formatDate(event?.ts)}`;
+    const typeLower = String(typeLabel).toLowerCase();
+    const detailLower = String(detailLabel || '').toLowerCase();
+    const kind = detailLower.includes('failed') || typeLower.includes('error') || typeLower.includes('failed')
+      ? 'failure'
+      : (typeLower.startsWith('replay.command')
+        ? 'command'
+        : (typeLower.startsWith('replay.network')
+          ? 'network'
+          : (typeLower.startsWith('replay.console')
+            ? 'console'
+            : (typeLower.startsWith('replay.log') ? 'log' : 'event'))));
     const activeClass = idx === initialIndex ? ' replay-step-active' : '';
-    return `<button type="button" data-step="${idx}" class="button button-secondary replay-step-button${activeClass}" style="justify-content:flex-start; text-align:left; width:100%;">${escapeHtml(rowText)}</button>`;
+    return `<button type="button" data-step="${idx}" class="button button-secondary replay-step-button replay-step-kind-${escapeHtml(kind)}${activeClass}">
+      <span class="replay-step-index">${idx + 1}</span>
+      <span class="replay-step-body">
+        <strong class="replay-step-command">${escapeHtml(String(titleLabel).slice(0, 120))}</strong>
+        <small class="replay-step-meta-line">${escapeHtml(typeShort)}${detailLabel ? ` · ${escapeHtml(String(detailLabel).slice(0, 120))}` : ''} · ${escapeHtml(formatDate(event?.ts))}</small>
+      </span>
+    </button>`;
   }).join('');
 
   const replayJsonBase64 = Buffer.from(JSON.stringify(normalized), 'utf8').toString('base64');
@@ -1187,7 +1204,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           </div>
           <a class="button button-secondary" href="/app/runs/${escapeHtml(runId)}">Back to run detail</a>
         </div>
-        ${normalized.length ? `<div class="stack">
+        ${normalized.length ? `<div id="replay-shell" class="stack replay-shell">
           <div class="grid three-up replay-toolbar">
             <label>Spec / attempt
               <select id="replay-spec-select"></select>
@@ -1205,24 +1222,31 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               <button type="button" class="button button-secondary" id="replay-play-pause">Play</button>
               <button type="button" class="button button-secondary" id="replay-step-prev">Prev</button>
               <button type="button" class="button button-secondary" id="replay-step-next">Next</button>
+              <button type="button" class="button button-secondary" id="replay-toggle-modal">Focus mode</button>
             </div>
           </div>
           <input id="replay-step" type="range" min="0" max="${Math.max(0, normalized.length - 1)}" value="${initialIndex}" />
-          <div class="grid two-up replay-grid">
-            <div class="panel">
+          <div class="replay-main-layout">
+            <div class="panel replay-column replay-column-left">
               <div class="panel-header compact"><strong>Command Log</strong><small id="replay-step-meta">${initialIndex + 1} / ${normalized.length}</small></div>
-              <div id="replay-step-list" class="stack" style="max-height: 360px; overflow: auto;">${initialStepListHtml}</div>
+              <div id="replay-step-list" class="stack">${initialStepListHtml}</div>
             </div>
-            <div class="panel">
+            <div class="panel replay-column replay-column-center">
               <div class="panel-header compact"><strong>Application under test</strong><small id="replay-event-title">${escapeHtml(initialReplayTitle)}</small></div>
-              <iframe id="replay-frame" sandbox="allow-same-origin" referrerpolicy="no-referrer" srcdoc="${escapeHtml(initialDomSrcDoc)}" style="width:100%; min-height:420px; border:1px solid var(--border); border-radius:12px; background:#fff;"></iframe>
+              <div id="replay-frame-stage" class="replay-frame-stage">
+                <iframe id="replay-frame" sandbox="allow-same-origin" referrerpolicy="no-referrer" srcdoc="${escapeHtml(initialDomSrcDoc)}"></iframe>
+              </div>
+              <small class="replay-fit-note">Auto-fit keeps the full viewport visible at each step.</small>
+            </div>
+            <div class="panel replay-column replay-column-right">
+              <div class="panel-header compact"><strong>Console (cumulative)</strong></div>
+              <pre id="replay-console" class="code-block replay-side-log">${escapeHtml(initialConsoleText)}</pre>
+              <div class="panel-header compact"><strong>Network (cumulative)</strong></div>
+              <pre id="replay-network" class="code-block replay-side-log">${escapeHtml(initialNetworkText)}</pre>
+              <div class="panel-header compact"><strong>Cypress Runner Log (cumulative)</strong></div>
+              <pre id="replay-runner-log" class="code-block replay-side-log">${escapeHtml(initialRunnerText)}</pre>
             </div>
           </div>
-          <div class="grid two-up replay-grid">
-            <div class="panel"><div class="panel-header compact"><strong>Console (cumulative)</strong></div><pre id="replay-console" class="code-block">${escapeHtml(initialConsoleText)}</pre></div>
-            <div class="panel"><div class="panel-header compact"><strong>Network (cumulative)</strong></div><pre id="replay-network" class="code-block">${escapeHtml(initialNetworkText)}</pre></div>
-          </div>
-          <div class="panel"><div class="panel-header compact"><strong>Cypress Runner Log (cumulative)</strong></div><pre id="replay-runner-log" class="code-block">${escapeHtml(initialRunnerText)}</pre></div>
         </div>` : '<div class="empty-state"><h3>No replay events found</h3><p>Enable replay hooks in your Cypress support file to capture DOM/network/console data, then rerun tests.</p></div>'}
       </section>
       <script id="replay-data" type="text/plain">${replayJsonBase64}</script>`

@@ -63,6 +63,9 @@ function initReplayPage() {
   const slider = document.getElementById('replay-step');
   const list = document.getElementById('replay-step-list');
   const frame = document.getElementById('replay-frame');
+  const frameStage = document.getElementById('replay-frame-stage');
+  const replayShell = document.getElementById('replay-shell');
+  const modalToggleButton = document.getElementById('replay-toggle-modal');
   const meta = document.getElementById('replay-step-meta');
   const title = document.getElementById('replay-event-title');
   const consoleNode = document.getElementById('replay-console');
@@ -74,7 +77,7 @@ function initReplayPage() {
   const prevButton = document.getElementById('replay-step-prev');
   const nextButton = document.getElementById('replay-step-next');
 
-  if (!slider || !list || !frame || !meta || !title || !consoleNode || !networkNode || !runnerNode || !specSelect || !speedSelect || !playPauseButton || !prevButton || !nextButton) return;
+  if (!slider || !list || !frame || !frameStage || !meta || !title || !consoleNode || !networkNode || !runnerNode || !specSelect || !speedSelect || !playPauseButton || !prevButton || !nextButton) return;
 
   function asObject(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -171,7 +174,7 @@ function initReplayPage() {
     return text;
   }
 
-  function sanitizeSnapshotHtml(value) {
+  function sanitizeSnapshotHtml(value, baseUrl = '') {
     const html = normalizeSerializedText(value);
     if (!html) return '';
 
@@ -179,11 +182,111 @@ function initReplayPage() {
       const parser = new DOMParser();
       const doc = parser.parseFromString(html, 'text/html');
       if (!doc || !doc.documentElement) return html;
+
       for (const node of doc.querySelectorAll('script, noscript')) node.remove();
+
+      const head = doc.head || doc.documentElement;
+      if (head && baseUrl) {
+        const safeBase = String(baseUrl).trim();
+        if (safeBase && /^(https?:|\/)/i.test(safeBase)) {
+          let baseNode = doc.querySelector('base');
+          if (!baseNode) {
+            baseNode = doc.createElement('base');
+            head.insertBefore(baseNode, head.firstChild || null);
+          }
+          baseNode.setAttribute('href', safeBase);
+        }
+      }
+
       return '<!doctype html>' + doc.documentElement.outerHTML;
     } catch {
       return html;
     }
+  }
+
+  function resolveEventUrl(event) {
+    const e = asObject(event);
+    const payload = asObject(e.payload);
+    const nested = asObject(payload.payload);
+    return firstNonEmpty(
+      e.url,
+      payload.url,
+      nested.url,
+      payload.currentUrl,
+      nested.currentUrl,
+      payload.pageUrl,
+      nested.pageUrl
+    );
+  }
+
+  function extractViewport(event) {
+    const e = asObject(event);
+    const payload = asObject(e.payload);
+    const nested = asObject(payload.payload);
+
+    const width = Number(firstNonEmpty(
+      e.viewportWidth,
+      payload.viewportWidth,
+      nested.viewportWidth,
+      payload.viewport?.width,
+      nested.viewport?.width,
+      1280
+    )) || 1280;
+
+    const height = Number(firstNonEmpty(
+      e.viewportHeight,
+      payload.viewportHeight,
+      nested.viewportHeight,
+      payload.viewport?.height,
+      nested.viewport?.height,
+      720
+    )) || 720;
+
+    return {
+      width: Math.min(Math.max(width, 320), 4096),
+      height: Math.min(Math.max(height, 240), 4096),
+      url: resolveEventUrl(event)
+    };
+  }
+
+  function fitFrameToStage(viewportMeta) {
+    if (!frameStage) return;
+
+    const stageRect = frameStage.getBoundingClientRect();
+    if (!stageRect.width || !stageRect.height) return;
+
+    let width = Number(viewportMeta?.width || 1280) || 1280;
+    let height = Number(viewportMeta?.height || 720) || 720;
+
+    try {
+      const doc = frame.contentDocument;
+      const docHeight = Math.max(
+        Number(doc?.documentElement?.scrollHeight || 0),
+        Number(doc?.body?.scrollHeight || 0)
+      );
+      const docWidth = Math.max(
+        Number(doc?.documentElement?.scrollWidth || 0),
+        Number(doc?.body?.scrollWidth || 0)
+      );
+      if (docHeight > 0) height = Math.max(height, Math.min(docHeight, 5000));
+      if (docWidth > 0) width = Math.max(width, Math.min(docWidth, 5000));
+    } catch {
+      // ignore cross-doc sizing failures
+    }
+
+    const scale = Math.min(
+      stageRect.width / Math.max(width, 1),
+      stageRect.height / Math.max(height, 1),
+      1
+    );
+
+    frame.style.width = `${Math.round(width)}px`;
+    frame.style.height = `${Math.round(height)}px`;
+    frame.style.transform = `scale(${scale})`;
+    frame.style.transformOrigin = 'top left';
+
+    const fittedHeight = Math.max(220, Math.round(height * scale) + 8);
+    frameStage.style.minHeight = `${fittedHeight}px`;
   }
 
   function extractConsole(event) {
@@ -239,6 +342,8 @@ function initReplayPage() {
   const allEvents = Array.isArray(events) ? events : [];
   let activeEvents = allEvents.slice();
   let playbackTimer = null;
+  let modalOpen = false;
+  let currentViewport = { width: 1280, height: 720, url: '' };
 
   function stopPlayback() {
     if (playbackTimer) {
@@ -328,6 +433,19 @@ function initReplayPage() {
     return type.includes('error') || type.includes('failed') || status === 'failed' || detail.includes(' failed');
   }
 
+  function classifyReplayEvent(event) {
+    const e = asObject(event);
+    const payload = asObject(e.payload);
+    const nested = asObject(payload.payload);
+    const type = firstNonEmpty(e.type, payload.type, nested.type, 'replay.event').toLowerCase();
+    if (isFailureEvent(event)) return 'failure';
+    if (type.startsWith('replay.command')) return 'command';
+    if (type.startsWith('replay.network')) return 'network';
+    if (type.startsWith('replay.console')) return 'console';
+    if (type.startsWith('replay.log')) return 'log';
+    return 'event';
+  }
+
   function findDefaultStepIndex(items) {
     if (!Array.isArray(items) || !items.length) return 0;
     for (let i = 0; i < items.length; i += 1) {
@@ -369,10 +487,20 @@ function initReplayPage() {
       const payload = asObject(e.payload);
       const nested = asObject(payload.payload);
       const typeLabel = firstNonEmpty(e.type, payload.type, nested.type, 'replay.event');
-      const titleLabel = firstNonEmpty(e.title, e.command, payload.name, payload.command, nested.name, nested.command);
+      const typeShort = String(typeLabel).replace(/^replay\./, '');
+      const commandLabel = firstNonEmpty(e.command, payload.command, payload.name, nested.command, nested.name);
+      const titleLabel = firstNonEmpty(e.title, commandLabel, typeShort, 'event');
       const detailLabel = firstNonEmpty(e.detail, payload.message, nested.message, payload.detail, nested.detail);
-      const rowText = `${idx + 1}. ${typeLabel}${titleLabel ? ` · ${String(titleLabel).slice(0, 80)}` : ''}${detailLabel ? ` — ${String(detailLabel).slice(0, 80)}` : ''} · ${safeIso(e.ts || payload.ts || nested.ts)}`;
-      return `<button type="button" data-step="${idx}" class="button button-secondary replay-step-button" style="justify-content:flex-start; text-align:left; width:100%;">${escapeHtmlInline(rowText)}</button>`;
+      const when = safeIso(e.ts || payload.ts || nested.ts);
+      const kind = classifyReplayEvent(event);
+
+      return `<button type="button" data-step="${idx}" class="button button-secondary replay-step-button replay-step-kind-${escapeHtmlInline(kind)}">
+        <span class="replay-step-index">${idx + 1}</span>
+        <span class="replay-step-body">
+          <strong class="replay-step-command">${escapeHtmlInline(titleLabel)}</strong>
+          <small class="replay-step-meta-line">${escapeHtmlInline(typeShort)}${detailLabel ? ` · ${escapeHtmlInline(String(detailLabel).slice(0, 120))}` : ''} · ${escapeHtmlInline(when)}</small>
+        </span>
+      </button>`;
     }).join('');
 
     for (const button of list.querySelectorAll('button[data-step]')) {
@@ -399,8 +527,14 @@ function initReplayPage() {
     meta.textContent = (activeEvents.length ? idx + 1 : 0) + ' / ' + activeEvents.length;
     title.textContent = eventTitle + ' @ ' + safeIso(firstNonEmpty(event.ts, payload.ts, nested.ts));
 
+    const viewport = extractViewport(event);
+    currentViewport = viewport;
+
     const domRef = findDomAtOrBefore(idx);
-    const sanitizedDom = domRef && domRef.dom ? sanitizeSnapshotHtml(domRef.dom) : '';
+    const domSourceEvent = domRef ? getEvent(domRef.index) : event;
+    const domBaseUrl = resolveEventUrl(domSourceEvent) || viewport.url || '';
+    const sanitizedDom = domRef && domRef.dom ? sanitizeSnapshotHtml(domRef.dom, domBaseUrl) : '';
+
     if (sanitizedDom) {
       frame.srcdoc = String(sanitizedDom);
     } else {
@@ -410,11 +544,16 @@ function initReplayPage() {
         + '<p><strong>Type:</strong> ' + escapeHtmlInline(eventType) + '</p>'
         + '<p><strong>Title:</strong> ' + escapeHtmlInline(eventTitle) + '</p>'
         + '<p><strong>Detail:</strong> ' + escapeHtmlInline(eventDetail) + '</p>'
+        + (domBaseUrl ? '<p><strong>Last page URL:</strong> ' + escapeHtmlInline(domBaseUrl) + '</p>' : '')
         + '<pre style="white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;">'
         + escapeHtmlInline(String(payloadPreview).slice(0, 12000))
         + '</pre>'
         + '</body></html>';
     }
+
+    const fitNow = () => fitFrameToStage(currentViewport);
+    frame.onload = fitNow;
+    window.requestAnimationFrame(fitNow);
 
     const consoleData = collectUpTo(idx, extractConsole, 250);
     const networkData = collectUpTo(idx, extractNetwork, 250);
@@ -507,6 +646,29 @@ function initReplayPage() {
 
     speedSelect.addEventListener('change', () => {
       if (playbackTimer) stopPlayback();
+    });
+
+    const setModalOpen = (next) => {
+      if (!replayShell || !modalToggleButton) return;
+      modalOpen = Boolean(next);
+      replayShell.classList.toggle('is-modal-open', modalOpen);
+      document.body.classList.toggle('replay-modal-open', modalOpen);
+      modalToggleButton.textContent = modalOpen ? 'Close focus' : 'Focus mode';
+      window.requestAnimationFrame(() => fitFrameToStage(currentViewport));
+    };
+
+    if (modalToggleButton && replayShell) {
+      modalToggleButton.addEventListener('click', () => {
+        setModalOpen(!modalOpen);
+      });
+    }
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && modalOpen) setModalOpen(false);
+    });
+
+    window.addEventListener('resize', () => {
+      window.requestAnimationFrame(() => fitFrameToStage(currentViewport));
     });
 
     applySpecSelection(defaultSpecKey, false);

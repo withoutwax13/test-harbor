@@ -59,6 +59,19 @@ function getCurrentUrl() {
   }
 }
 
+function getViewportInfo() {
+  try {
+    const win = Cypress?.state?.('window');
+    const viewportWidth = Number(Cypress?.config?.('viewportWidth') || win?.innerWidth || 0) || null;
+    const viewportHeight = Number(Cypress?.config?.('viewportHeight') || win?.innerHeight || 0) || null;
+    const scrollX = Number(win?.scrollX || win?.pageXOffset || 0) || 0;
+    const scrollY = Number(win?.scrollY || win?.pageYOffset || 0) || 0;
+    return { viewportWidth, viewportHeight, scrollX, scrollY };
+  } catch {
+    return { viewportWidth: null, viewportHeight: null, scrollX: 0, scrollY: 0 };
+  }
+}
+
 function getCurrentDomSnapshot(maxChars = 120000) {
   try {
     const doc = Cypress?.state?.('document');
@@ -166,6 +179,8 @@ export function installTestHarborReplayHooks(options = {}) {
       }
     }
 
+    const viewport = getViewportInfo();
+
     enqueue({
       type: 'replay.command',
       title: name,
@@ -180,6 +195,10 @@ export function installTestHarborReplayHooks(options = {}) {
         wallClockStartedAt: attributes.wallClockStartedAt || null,
         endedAt: toIso(),
         url: getCurrentUrl(),
+        viewportWidth: viewport.viewportWidth,
+        viewportHeight: viewport.viewportHeight,
+        scrollX: viewport.scrollX,
+        scrollY: viewport.scrollY,
         consoleProps
       }
     });
@@ -352,16 +371,33 @@ export function installTestHarborReplayHooks(options = {}) {
     beforeEach(function () {
       const test = this?.currentTest;
       const titlePath = typeof test?.titlePath === 'function' ? test.titlePath() : [];
+      const viewport = getViewportInfo();
+      let domSnapshot = null;
+      if (captureDom) {
+        const candidate = getCurrentDomSnapshot(maxDomChars);
+        if (candidate) {
+          const hash = simpleHash(candidate);
+          if (hash !== lastDomHash) {
+            domSnapshot = candidate;
+            lastDomHash = hash;
+          }
+        }
+      }
       enqueue({
         type: 'replay.test.started',
         title: test?.title || 'test',
         detail: titlePath.length ? titlePath.join(' > ') : 'Test started',
+        domSnapshot,
         payload: {
           testTitle: test?.title || null,
           fullTitle: typeof test?.fullTitle === 'function' ? test.fullTitle() : null,
           specPath: getSpecPath(),
           startedAt: toIso(),
-          url: getCurrentUrl()
+          url: getCurrentUrl(),
+          viewportWidth: viewport.viewportWidth,
+          viewportHeight: viewport.viewportHeight,
+          scrollX: viewport.scrollX,
+          scrollY: viewport.scrollY
         }
       });
     });
@@ -371,6 +407,7 @@ export function installTestHarborReplayHooks(options = {}) {
     afterEach(function () {
       const test = this?.currentTest;
       const titlePath = typeof test?.titlePath === 'function' ? test.titlePath() : [];
+      const viewport = getViewportInfo();
       const finishEvent = {
         type: 'replay.test.finished',
         title: test?.title || 'test',
@@ -383,6 +420,10 @@ export function installTestHarborReplayHooks(options = {}) {
           specPath: getSpecPath(),
           endedAt: toIso(),
           url: getCurrentUrl(),
+          viewportWidth: viewport.viewportWidth,
+          viewportHeight: viewport.viewportHeight,
+          scrollX: viewport.scrollX,
+          scrollY: viewport.scrollY,
           titlePath,
           err: serializeValue(test?.err || null, maxRunnerMessageChars)
         }
@@ -409,6 +450,10 @@ export function installTestHarborReplayHooks(options = {}) {
                 testTitle: test?.title || null,
                 state: test?.state || null,
                 url: getCurrentUrl(),
+                viewportWidth: viewport.viewportWidth,
+                viewportHeight: viewport.viewportHeight,
+                scrollX: viewport.scrollX,
+                scrollY: viewport.scrollY,
                 capturedAt: toIso()
               }
             });
