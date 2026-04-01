@@ -551,42 +551,61 @@ export function installTestHarborReplayHooks(options = {}) {
   function flushQueuedEvents() {
     flushMutationBatch();
     if (!queue.length) return cy.wrap(null, { log: false });
-    const events = queue.splice(0, queue.length);
+
+    const allEvents = queue.splice(0, queue.length);
     const specPath = getSpecPath();
-    const droppedForChunk = droppedEventsSinceFlush;
-    const chunkSeq = replayChunkSeq + 1;
-    const encodedBytes = estimatePayloadBytes(events);
-    const truncatedEvents = countLikelyTruncatedEvents(events);
-    return cy
-      .task('testharbor:replay', {
-        specPath,
-        events,
-        meta: {
-          clientChunkSeq: chunkSeq,
-          compression: 'none',
-          encodedBytes,
-          droppedEvents: droppedForChunk,
-          droppedEventsTotal,
-          truncatedEvents
-        }
-      }, { log: false })
-      .then(
-        () => {
-          replayChunkSeq = chunkSeq;
-          droppedEventsSinceFlush = 0;
-          return null;
-        },
-        (error) => {
-          // restore events for next flush attempt (bounded by maxEvents)
-          queue.unshift(...events);
-          if (queue.length > maxEvents) {
-            queue.splice(0, queue.length - maxEvents);
+    const droppedForFlush = droppedEventsSinceFlush;
+    const maxFlushEventsPerTask = Math.max(10, toNumber(options.maxFlushEventsPerTask || Cypress.env('TESTHARBOR_REPLAY_MAX_FLUSH_EVENTS') || 80, 80));
+
+    const chunks = [];
+    for (let i = 0; i < allEvents.length; i += maxFlushEventsPerTask) {
+      chunks.push(allEvents.slice(i, i + maxFlushEventsPerTask));
+    }
+
+    const sendChunk = (index) => {
+      if (index >= chunks.length) {
+        droppedEventsSinceFlush = 0;
+        return null;
+      }
+
+      const events = chunks[index];
+      const chunkSeq = replayChunkSeq + 1;
+      const encodedBytes = estimatePayloadBytes(events);
+      const truncatedEvents = countLikelyTruncatedEvents(events);
+      const droppedForChunk = index === 0 ? droppedForFlush : 0;
+
+      return cy
+        .task('testharbor:replay', {
+          specPath,
+          events,
+          meta: {
+            clientChunkSeq: chunkSeq,
+            compression: 'none',
+            encodedBytes,
+            droppedEvents: droppedForChunk,
+            droppedEventsTotal,
+            truncatedEvents
           }
-          // eslint-disable-next-line no-console
-          console.warn('[testharbor] replay flush failed', error?.message || error);
-          return null;
-        }
-      );
+        }, { log: false })
+        .then(
+          () => {
+            replayChunkSeq = chunkSeq;
+            return sendChunk(index + 1);
+          },
+          (error) => {
+            const unsent = chunks.slice(index).flat();
+            queue.unshift(...unsent);
+            if (queue.length > maxEvents) {
+              queue.splice(0, queue.length - maxEvents);
+            }
+            // eslint-disable-next-line no-console
+            console.warn('[testharbor] replay flush failed', error?.message || error);
+            return null;
+          }
+        );
+    };
+
+    return sendChunk(0);
   }
 
 
