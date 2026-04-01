@@ -1239,6 +1239,14 @@ function renderRunReplayPage(shell, replayDetail, runId) {
     return n + ((domMeta.degraded || !extractDom(event) || !Object.keys(event?.target || {}).length) ? 1 : 0);
   }, 0);
   const replaySpecCount = new Set(normalized.map((event) => firstText(event?.specRunId, event?.specPath)).filter(Boolean)).size;
+  const replayIngest = replayDetail?.replayIngest && typeof replayDetail.replayIngest === 'object'
+    ? replayDetail.replayIngest
+    : {};
+  const replayDiagnosticsBase64 = Buffer.from(JSON.stringify({
+    replayIngest,
+    pageInfo: replayDetail?.pageInfo || {},
+    eventCount: normalized.length
+  }), 'utf8').toString('base64');
 
   return renderLayout({
     title: `Replay ${runId.slice(0, 8)}`,
@@ -1257,6 +1265,9 @@ function renderRunReplayPage(shell, replayDetail, runId) {
           ${summaryCard('Network entries', String(networkEntryCount), 'Cumulative up to selected step')}
           ${summaryCard('DOM snapshots', String(domEntryCount), 'Exact-step snapshots captured by the reporter')}
           ${summaryCard('Degraded steps', String(degradedStepCount), degradedStepCount ? 'Explicitly flagged in inspector UI' : 'All visible steps include DOM + target metadata')}
+          ${summaryCard('Replay chunks', String(Number(replayIngest.chunkCount || 0)), 'Ingested replay chunk envelopes')}
+          ${summaryCard('Dropped events', String(Number(replayIngest.droppedEventsTotal || replayIngest.droppedEvents || 0)), 'Queue overflow + capped flush losses')}
+          ${summaryCard('Truncated events', String(Number(replayIngest.truncatedEvents || 0)), 'Payload truncation/degraded captures')}
         </div>
       </section>
       <section class="panel">
@@ -1301,6 +1312,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               <button type="button" class="button button-secondary" id="replay-toggle-modal">Focus mode</button>
             </div>
           </div>
+          <div id="replay-diagnostics" class="empty-state" style="padding:10px 12px;">Replay diagnostics pending…</div>
           <input id="replay-step" type="range" min="0" max="${Math.max(0, normalized.length - 1)}" value="${initialIndex}" />
           <div class="replay-main-layout">
             <div class="panel replay-column replay-column-left">
@@ -1333,7 +1345,8 @@ function renderRunReplayPage(shell, replayDetail, runId) {
         </div>` : '<div class="empty-state"><h3>No replay events found</h3><p>Enable replay hooks in your Cypress support file to capture DOM/network/console data, then rerun tests.</p></div>'}
       </section>
       <script id="replay-data" type="text/plain">${replayJsonBase64}</script>
-      <script id="replay-media-data" type="text/plain">${replayMediaBase64}</script>`
+      <script id="replay-media-data" type="text/plain">${replayMediaBase64}</script>
+      <script id="replay-meta-data" type="text/plain">${replayDiagnosticsBase64}</script>`
   });
 }
 

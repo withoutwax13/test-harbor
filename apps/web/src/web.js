@@ -43,6 +43,7 @@ function initReplayPage() {
   if (!dataNode) return;
 
   const mediaNode = document.getElementById('replay-media-data');
+  const metaNode = document.getElementById('replay-meta-data');
 
   function decodePayload(encoded, fallbackValue) {
     if (!encoded) return fallbackValue;
@@ -62,6 +63,7 @@ function initReplayPage() {
 
   const events = decodePayload(dataNode.textContent || '', []);
   const mediaPayload = decodePayload(mediaNode?.textContent || '', { videos: [] }) || { videos: [] };
+  const replayMetaPayload = decodePayload(metaNode?.textContent || '', { replayIngest: {}, pageInfo: {}, eventCount: 0 }) || { replayIngest: {}, pageInfo: {}, eventCount: 0 };
 
   const slider = document.getElementById('replay-step');
   const list = document.getElementById('replay-step-list');
@@ -76,6 +78,7 @@ function initReplayPage() {
   const markerPrevButton = document.getElementById('replay-marker-prev');
   const markerNextButton = document.getElementById('replay-marker-next');
   const warningNode = document.getElementById('replay-step-warning');
+  const diagnosticsNode = document.getElementById('replay-diagnostics');
   const meta = document.getElementById('replay-step-meta');
   const title = document.getElementById('replay-event-title');
   const eventDetailNode = document.getElementById('replay-event-detail');
@@ -642,6 +645,23 @@ function initReplayPage() {
       out.push({ index: 0, label: '1. Start of timeline', type: 'replay.start', ts: null });
     }
     return out;
+  }
+
+
+  function renderReplayDiagnostics() {
+    if (!diagnosticsNode) return;
+    const ingest = asObject(replayMetaPayload.replayIngest);
+    const pageInfo = asObject(replayMetaPayload.pageInfo);
+    const dropped = Number(ingest.droppedEventsTotal || ingest.droppedEvents || 0);
+    const truncated = Number(ingest.truncatedEvents || 0);
+    const chunks = Number(ingest.chunkCount || 0);
+    const eventsSeen = Number(replayMetaPayload.eventCount || activeEvents.length || 0);
+    const flags = [];
+    if (dropped > 0) flags.push(`dropped=${dropped}`);
+    if (truncated > 0) flags.push(`truncated=${truncated}`);
+    if (pageInfo.truncated) flags.push('page-truncated=true');
+
+    diagnosticsNode.innerHTML = `<strong>Replay diagnostics:</strong> chunks=${chunks} · events=${eventsSeen} · dropped=${dropped} · truncated=${truncated}${flags.length ? ` · <code>${escapeHtmlInline(flags.join(' | '))}</code>` : ''}`;
   }
 
   function hydrateMarkerSelector() {
@@ -1266,6 +1286,7 @@ function initReplayPage() {
     eventTimelineMs = buildEventTimeline(activeEvents);
     markerEntries = buildMarkerEntries(activeEvents);
     hydrateMarkerSelector();
+    renderReplayDiagnostics();
     stopPlayback();
     renderList();
     renderCurrent();
