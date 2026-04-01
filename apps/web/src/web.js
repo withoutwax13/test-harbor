@@ -652,16 +652,52 @@ function initReplayPage() {
     if (!diagnosticsNode) return;
     const ingest = asObject(replayMetaPayload.replayIngest);
     const pageInfo = asObject(replayMetaPayload.pageInfo);
+
     const dropped = Number(ingest.droppedEventsTotal || ingest.droppedEvents || 0);
     const truncated = Number(ingest.truncatedEvents || 0);
     const chunks = Number(ingest.chunkCount || 0);
+    const chunkEvents = Number(ingest.chunkEventCount || 0);
     const eventsSeen = Number(replayMetaPayload.eventCount || activeEvents.length || 0);
+    const lastReceivedAt = firstNonEmpty(ingest.lastReceivedAt);
+
     const flags = [];
     if (dropped > 0) flags.push(`dropped=${dropped}`);
     if (truncated > 0) flags.push(`truncated=${truncated}`);
     if (pageInfo.truncated) flags.push('page-truncated=true');
 
-    diagnosticsNode.innerHTML = `<strong>Replay diagnostics:</strong> chunks=${chunks} · events=${eventsSeen} · dropped=${dropped} · truncated=${truncated}${flags.length ? ` · <code>${escapeHtmlInline(flags.join(' | '))}</code>` : ''}`;
+    const hasIssues = dropped > 0 || truncated > 0 || Boolean(pageInfo.truncated);
+    if (!hasIssues) {
+      diagnosticsNode.innerHTML = `<strong>Replay diagnostics:</strong> healthy · chunks=${chunks} · events=${eventsSeen}${lastReceivedAt ? ` · last=${escapeHtmlInline(safeIso(lastReceivedAt))}` : ''}`;
+      return;
+    }
+
+    const reasons = [];
+    if (dropped > 0) {
+      reasons.push('Reporter queue overflow detected (events were dropped before flush).');
+    }
+    if (truncated > 0) {
+      reasons.push('Payload truncation/degraded snapshots detected (large DOM/network/log payloads).');
+    }
+    if (pageInfo.truncated) {
+      reasons.push('Replay API pagination is truncated in this view (increase fetch limits or inspect raw API pages).');
+    }
+
+    const tuning = [];
+    if (dropped > 0) {
+      tuning.push('Increase `TESTHARBOR_REPLAY_MAX_EVENTS` and/or flush more frequently with lower `TESTHARBOR_REPLAY_MUTATION_BATCH_MS`.');
+      tuning.push('Reduce mutation pressure: lower `TESTHARBOR_REPLAY_MUTATION_MAX_RECORDS` and disable high-noise hooks in specs where possible.');
+    }
+    if (truncated > 0) {
+      tuning.push('Raise reporter caps where needed: `TESTHARBOR_REPLAY_MAX_DOM_CHARS`, `TESTHARBOR_REPLAY_MAX_NETWORK_BODY_CHARS`, `TESTHARBOR_REPLAY_MAX_DETAIL_CHARS`.');
+      tuning.push('Increase ingest body ceiling when safe: `INGEST_BODY_LIMIT_BYTES` / `TESTHARBOR_BODY_LIMIT_BYTES`.');
+    }
+    if (pageInfo.truncated) {
+      tuning.push('Increase web replay page fetch budget (`pageLimit`/`maxPages`) or query replay API directly with cursor iteration.');
+    }
+
+    diagnosticsNode.innerHTML = `<strong>Replay diagnostics:</strong> degraded · chunks=${chunks} · chunkEvents=${chunkEvents} · events=${eventsSeen} · dropped=${dropped} · truncated=${truncated}${lastReceivedAt ? ` · last=${escapeHtmlInline(safeIso(lastReceivedAt))}` : ''}${flags.length ? ` · <code>${escapeHtmlInline(flags.join(' | '))}</code>` : ''}`
+      + `<div style="margin-top:8px;"><strong>Likely causes</strong><ul style="margin:6px 0 0 18px;">${reasons.map((reason) => `<li>${escapeHtmlInline(reason)}</li>`).join('')}</ul></div>`
+      + `<div style="margin-top:8px;"><strong>Recommended knobs</strong><ul style="margin:6px 0 0 18px;">${tuning.map((tip) => `<li>${escapeHtmlInline(tip)}</li>`).join('')}</ul></div>`;
   }
 
   function hydrateMarkerSelector() {
