@@ -291,9 +291,12 @@ export function setupTestHarbor(on, config, options = {}) {
   const replayQueue = [];
   const registeredArtifactDedupeKeys = new Set();
   const replayFlushDebounceMs = Math.max(10, toNumber(process.env.TESTHARBOR_REPLAY_FLUSH_DEBOUNCE_MS, 200));
+  const replayMaxEventsPerChunk = Math.max(10, toNumber(process.env.TESTHARBOR_REPLAY_MAX_EVENTS_PER_CHUNK, 200));
+  const replayMaxChunkBytes = Math.max(8 * 1024, toNumber(process.env.TESTHARBOR_REPLAY_MAX_CHUNK_BYTES, 256 * 1024));
   let replayFlushTimer = null;
   let replayFlushInFlight = null;
   let replayFlushContext = {};
+  let replayEventSeq = 0;
 
   function pushReplayEvent(event = {}) {
     if (!event || typeof event !== 'object') return null;
@@ -304,17 +307,25 @@ export function setupTestHarbor(on, config, options = {}) {
       || asTrimmedString(payloadObj?.message)
       || (payloadObj ? asTrimmedString(JSON.stringify(payloadObj).slice(0, 1200)) : null);
 
+    replayEventSeq += 1;
+    const normalizedTs = toIso(event.ts || event.at || new Date());
+    const providedSeq = Number.isFinite(Number(event.eventSeq ?? payloadObj?.eventSeq)) ? Number(event.eventSeq ?? payloadObj?.eventSeq) : null;
     const enriched = {
       type: asTrimmedString(event.type) || 'replay.event',
-      ts: toIso(event.ts || event.at || new Date()),
+      event_type: asTrimmedString(event.event_type || payloadObj?.event_type) || asTrimmedString(event.type) || 'replay.event',
+      ts: normalizedTs,
       title: asTrimmedString(event.title || event.name || event.command) || null,
       detail: detailFallback,
       command: event.command || payloadObj?.command || null,
       status: asTrimmedString(event.status || payloadObj?.status || payloadObj?.state) || null,
       eventId: asTrimmedString(event.eventId || payloadObj?.eventId) || null,
-      eventSeq: Number.isFinite(Number(event.eventSeq ?? payloadObj?.eventSeq)) ? Number(event.eventSeq ?? payloadObj?.eventSeq) : null,
+      eventSeq: providedSeq ?? replayEventSeq,
+      seq: providedSeq ?? replayEventSeq,
+      tsEpochMs: Number.isFinite(Number(event.tsEpochMs ?? payloadObj?.tsEpochMs)) ? Number(event.tsEpochMs ?? payloadObj?.tsEpochMs) : null,
+      tsPerfMs: Number.isFinite(Number(event.tsPerfMs ?? payloadObj?.tsPerfMs)) ? Number(event.tsPerfMs ?? payloadObj?.tsPerfMs) : null,
       stepId: asTrimmedString(event.stepId || payloadObj?.stepId) || null,
       phase: asTrimmedString(event.phase || payloadObj?.phase) || null,
+      runId,
       specRunId: asTrimmedString(event.specRunId || payloadObj?.specRunId || payloadObj?.spec_run_id) || null,
       specPath: asTrimmedString(event.specPath || payloadObj?.specPath || payloadObj?.spec_path) || null,
       testResultId: asTrimmedString(event.testResultId || payloadObj?.testResultId || payloadObj?.test_result_id) || null,
@@ -342,6 +353,30 @@ export function setupTestHarbor(on, config, options = {}) {
       ...(context.specRunId ? { specRunId: context.specRunId } : {}),
       ...(context.testResultId ? { testResultId: context.testResultId } : {})
     };
+  }
+
+
+  function estimateEventBytes(event) {
+    try {
+      return Buffer.byteLength(JSON.stringify(event), 'utf8');
+    } catch {
+      return 1024;
+    }
+  }
+
+  function drainReplayBatch() {
+    if (!replayQueue.length) return [];
+    const out = [];
+    let bytes = 0;
+    while (replayQueue.length && out.length < replayMaxEventsPerChunk) {
+      const next = replayQueue[0];
+      const nextBytes = estimateEventBytes(next);
+      if (out.length > 0 && (bytes + nextBytes) > replayMaxChunkBytes) break;
+      out.push(replayQueue.shift());
+      bytes += nextBytes;
+      if (bytes >= replayMaxChunkBytes) break;
+    }
+    return out;
   }
 
   function clearReplayFlushTimer() {
@@ -372,15 +407,18 @@ export function setupTestHarbor(on, config, options = {}) {
 
     const flushContext = replayFlushContext;
     replayFlushContext = {};
-    const events = replayQueue.splice(0, replayQueue.length);
 
     replayFlushInFlight = (async () => {
-      await sendSafe(INGEST_EVENT_TYPES.REPLAY_CHUNK, {
-        runId,
-        ...(flushContext.specRunId ? { specRunId: flushContext.specRunId } : {}),
-        ...(flushContext.testResultId ? { testResultId: flushContext.testResultId } : {}),
-        events
-      });
+      while (replayQueue.length) {
+        const events = drainReplayBatch();
+        if (!events.length) break;
+        await sendSafe(INGEST_EVENT_TYPES.REPLAY_CHUNK, {
+          runId,
+          ...(flushContext.specRunId ? { specRunId: flushContext.specRunId } : {}),
+          ...(flushContext.testResultId ? { testResultId: flushContext.testResultId } : {}),
+          events
+        });
+      }
     })();
 
     try {
@@ -473,7 +511,7 @@ export function setupTestHarbor(on, config, options = {}) {
         scheduleReplayFlush({
           ...(flushSpecRunId ? { specRunId: flushSpecRunId } : {})
         });
-        if (replayQueue.length >= 50) {
+        if (replayQueue.length >= replayMaxEventsPerChunk) {
           void flushReplayChunk({
             ...(flushSpecRunId ? { specRunId: flushSpecRunId } : {})
           }).catch(() => {});

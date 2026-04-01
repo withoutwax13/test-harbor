@@ -225,6 +225,25 @@ function getCurrentUrl() {
   }
 }
 
+
+function getHiResTimestamp(win = null) {
+  try {
+    const target = win || Cypress?.state?.('window') || globalThis?.window || null;
+    const perf = target?.performance || null;
+    if (perf && typeof perf.now === 'function') {
+      const timeOrigin = Number.isFinite(Number(perf.timeOrigin)) ? Number(perf.timeOrigin) : Date.now();
+      const nowMs = Number(perf.now());
+      return {
+        ts: toIso(timeOrigin + nowMs),
+        tsEpochMs: Math.round(timeOrigin + nowMs),
+        tsPerfMs: Number(nowMs.toFixed(3))
+      };
+    }
+  } catch {}
+  const now = Date.now();
+  return { ts: toIso(now), tsEpochMs: now, tsPerfMs: null };
+}
+
 function getViewportInfo() {
   try {
     const win = Cypress?.state?.('window');
@@ -441,7 +460,7 @@ export function installTestHarborReplayHooks(options = {}) {
 
   const captureConsole = options.console !== false;
   const captureNetwork = options.network !== false;
-  const captureDom = options.dom !== false;
+  const captureDom = options.dom === true;
 
   const queue = [];
   const domSampleEvery = toNumber(options.domSampleEvery || Cypress.env('TESTHARBOR_REPLAY_DOM_SAMPLE_EVERY') || 1, 1);
@@ -450,8 +469,14 @@ export function installTestHarborReplayHooks(options = {}) {
   const maxNetworkBodyChars = toNumber(options.maxNetworkBodyChars || Cypress.env('TESTHARBOR_REPLAY_MAX_NETWORK_BODY_CHARS') || 1200, 1200);
   const maxNetworkHeaderValueChars = toNumber(options.maxNetworkHeaderValueChars || Cypress.env('TESTHARBOR_REPLAY_MAX_NETWORK_HEADER_VALUE_CHARS') || 400, 400);
   const maxNetworkHeaderEntries = toNumber(options.maxNetworkHeaderEntries || Cypress.env('TESTHARBOR_REPLAY_MAX_NETWORK_HEADER_ENTRIES') || 24, 24);
+  const mutationBatchMs = Math.max(100, toNumber(options.mutationBatchMs || Cypress.env('TESTHARBOR_REPLAY_MUTATION_BATCH_MS') || 500, 500));
+  const mutationMaxRecords = Math.max(20, toNumber(options.mutationMaxRecords || Cypress.env('TESTHARBOR_REPLAY_MUTATION_MAX_RECORDS') || 200, 200));
+  const mutationMaxPayloadChars = Math.max(120, toNumber(options.mutationMaxPayloadChars || Cypress.env('TESTHARBOR_REPLAY_MUTATION_MAX_PAYLOAD_CHARS') || 2000, 2000));
   let commandSeq = 0;
   let eventSeq = 0;
+  let mutationBuffer = [];
+  let mutationFlushTimer = null;
+  let mutationObserver = null;
 
   function nextEventMeta(stepId, phase = 'event') {
     eventSeq += 1;
@@ -489,6 +514,7 @@ export function installTestHarborReplayHooks(options = {}) {
   }
 
   function flushQueuedEvents() {
+    flushMutationBatch();
     if (!queue.length) return cy.wrap(null, { log: false });
     const events = queue.splice(0, queue.length);
     const specPath = getSpecPath();
@@ -534,12 +560,152 @@ export function installTestHarborReplayHooks(options = {}) {
     }
   }
 
+  function buildMutationRecord(kind, payload = {}, win = null) {
+    const hi = getHiResTimestamp(win);
+    return {
+      event_type: kind,
+      ts: hi.ts,
+      tsEpochMs: hi.tsEpochMs,
+      tsPerfMs: hi.tsPerfMs,
+      payload: compactSerializable(payload, {
+        maxDepth: 3,
+        maxItems: 20,
+        maxKeys: 20,
+        maxString: mutationMaxPayloadChars
+      })
+    };
+  }
+
+  function queueMutationRecord(record, context = {}) {
+    if (!record) return;
+    mutationBuffer.push(record);
+    if (mutationBuffer.length >= mutationMaxRecords) {
+      flushMutationBatch(context);
+      return;
+    }
+    if (!mutationFlushTimer) {
+      mutationFlushTimer = setTimeout(() => {
+        mutationFlushTimer = null;
+        flushMutationBatch(context);
+      }, mutationBatchMs);
+    }
+  }
+
+  function flushMutationBatch(context = {}) {
+    if (!mutationBuffer.length) return;
+    if (mutationFlushTimer) {
+      clearTimeout(mutationFlushTimer);
+      mutationFlushTimer = null;
+    }
+    const records = mutationBuffer.splice(0, mutationBuffer.length);
+    const hi = getHiResTimestamp();
+    enqueue({
+      type: 'replay.mutation.batch',
+      ts: hi.ts,
+      title: 'mutation-batch',
+      detail: `mutation batch (${records.length})`,
+      ...nextEventMeta(`mutation:${hi.tsEpochMs || Date.now()}`, 'batch'),
+      payload: {
+        event_type: 'mutation_batch',
+        tsEpochMs: hi.tsEpochMs,
+        tsPerfMs: hi.tsPerfMs,
+        records,
+        count: records.length,
+        ...(context.stepId ? { stepId: context.stepId } : {}),
+        ...(context.specRunId ? { specRunId: context.specRunId } : {})
+      }
+    });
+  }
+
+  function setupMutationObserver(win) {
+    if (!win || !win.document || mutationObserver) return;
+
+    const observerTarget = win.document.documentElement || win.document;
+    const onMutation = (list) => {
+      for (const mutation of list) {
+        if (!mutation) continue;
+        if (mutation.type === 'attributes') {
+          queueMutationRecord(buildMutationRecord('dom.attribute', {
+            name: mutation.attributeName || null,
+            target: serializeElement(mutation.target, 120),
+            value: mutation.target?.getAttribute?.(mutation.attributeName || '') || null
+          }, win));
+          continue;
+        }
+        if (mutation.type === 'characterData') {
+          queueMutationRecord(buildMutationRecord('dom.text', {
+            target: serializeElement(mutation.target?.parentElement || null, 120),
+            text: truncateText(mutation.target?.data || '', mutationMaxPayloadChars)
+          }, win));
+          continue;
+        }
+        if (mutation.type === 'childList') {
+          queueMutationRecord(buildMutationRecord('dom.child_list', {
+            target: serializeElement(mutation.target, 120),
+            added: Array.from(mutation.addedNodes || []).slice(0, 10).map((n) => serializeElement(n, 80)).filter(Boolean),
+            removed: Array.from(mutation.removedNodes || []).slice(0, 10).map((n) => serializeElement(n, 80)).filter(Boolean)
+          }, win));
+        }
+      }
+    };
+
+    mutationObserver = new win.MutationObserver(onMutation);
+    mutationObserver.observe(observerTarget, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true,
+      attributeOldValue: false,
+      characterDataOldValue: false
+    });
+
+    queueMutationRecord(buildMutationRecord('dom.initial', {
+      url: win.location?.href || null,
+      title: win.document?.title || null,
+      viewport: getViewportInfo()
+    }, win));
+
+    if (typeof win.addEventListener === 'function') {
+      win.addEventListener('scroll', () => {
+        queueMutationRecord(buildMutationRecord('scroll', {
+          x: Number(win.scrollX || 0),
+          y: Number(win.scrollY || 0)
+        }, win));
+      }, { passive: true });
+
+      win.addEventListener('mousemove', (evt) => {
+        queueMutationRecord(buildMutationRecord('mouse.move', {
+          x: Number(evt?.clientX || 0),
+          y: Number(evt?.clientY || 0)
+        }, win));
+      }, { passive: true });
+
+      win.addEventListener('click', (evt) => {
+        queueMutationRecord(buildMutationRecord('mouse.click', {
+          x: Number(evt?.clientX || 0),
+          y: Number(evt?.clientY || 0),
+          button: Number(evt?.button || 0),
+          target: serializeElement(evt?.target, 120)
+        }, win));
+      }, { passive: true });
+
+      win.addEventListener('input', (evt) => {
+        queueMutationRecord(buildMutationRecord('input', {
+          target: serializeElement(evt?.target, 120),
+          value: truncateText(evt?.target?.value || '', 120)
+        }, win));
+      }, { passive: true });
+    }
+  }
+
+
   Cypress.on('command:start', (command) => {
     const attributes = command?.attributes || {};
     const name = command?.name || attributes.name || 'command';
     const viewport = getViewportInfo();
     const stepId = `command:${attributes.id || command?.id || `${name}:${commandSeq + 1}`}`;
     const eventMeta = nextEventMeta(stepId, 'start');
+    queueMutationRecord(buildMutationRecord('marker.command.start', { name, stepId, commandSeq: commandSeq + 1 }), { stepId });
     const target = getCommandTargetMeta(command, maxTargetTextChars);
     const domState = captureDomState(maxDomChars);
     const startedAt = attributes.wallClockStartedAt || toIso();
@@ -587,6 +753,7 @@ export function installTestHarborReplayHooks(options = {}) {
     commandSeq += 1;
     const stepId = `command:${attributes.id || command?.id || `${name}:${commandSeq}`}`;
     const eventMeta = nextEventMeta(stepId, 'end');
+    queueMutationRecord(buildMutationRecord('marker.command.end', { name, stepId, commandSeq }), { stepId });
     const target = getCommandTargetMeta(command, maxTargetTextChars);
 
     let consoleProps = null;
@@ -797,6 +964,8 @@ export function installTestHarborReplayHooks(options = {}) {
   Cypress.on('window:before:load', (win) => {
     if (!win || win.__testharborReplayPatched) return;
     win.__testharborReplayPatched = true;
+
+    setupMutationObserver(win);
 
     if (captureConsole && win.console) {
       ['log', 'info', 'warn', 'error'].forEach((level) => {
@@ -1015,6 +1184,7 @@ export function installTestHarborReplayHooks(options = {}) {
       const viewport = getViewportInfo();
       const stepId = `test:${simpleHash(typeof test?.fullTitle === 'function' ? test.fullTitle() : test?.title || 'test')}`;
       const eventMeta = nextEventMeta(stepId, 'start');
+      queueMutationRecord(buildMutationRecord('marker.test.start', { stepId, testTitle: test?.title || null }), { stepId });
       const domState = captureDom ? captureDomState(maxDomChars) : { domSnapshot: null, domCapture: { available: false, degraded: true, degradedReason: 'dom_capture_disabled' } };
       enqueue({
         type: 'replay.test.started',
@@ -1049,6 +1219,7 @@ export function installTestHarborReplayHooks(options = {}) {
       const viewport = getViewportInfo();
       const stepId = `test:${simpleHash(typeof test?.fullTitle === 'function' ? test.fullTitle() : test?.title || 'test')}`;
       const eventMeta = nextEventMeta(stepId, 'end');
+      queueMutationRecord(buildMutationRecord('marker.test.end', { stepId, testTitle: test?.title || null, state: test?.state || null }), { stepId });
       const finishEvent = {
         type: 'replay.test.finished',
         title: test?.title || 'test',
@@ -1115,7 +1286,11 @@ export function installTestHarborReplayHooks(options = {}) {
   }
 
   if (typeof after === 'function') {
-    after(() => flushQueuedEvents());
+    after(() => {
+      try { if (mutationObserver) mutationObserver.disconnect(); } catch {}
+      flushMutationBatch();
+      return flushQueuedEvents();
+    });
   }
 }
 

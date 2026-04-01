@@ -149,7 +149,7 @@ function normalizeReplayEventRecord(chunkPayload, event) {
     runId: chunkPayload.runId,
     specRunId: firstPresent(event?.specRunId, payload.specRunId, chunkPayload.specRunId),
     testResultId: firstPresent(event?.testResultId, payload.testResultId, chunkPayload.testResultId),
-    eventType: normalizeReplayText(firstPresent(event?.type, payload.type)) || 'replay.event',
+    eventType: normalizeReplayText(firstPresent(event?.event_type, payload.event_type, event?.type, payload.type)) || 'replay.event',
     eventTs: firstPresent(event?.ts, event?.at, payload.ts, payload.at, null),
     eventSeq: normalizeReplaySeq(firstPresent(event?.eventSeq, payload.eventSeq, event?.seq, payload.seq)),
     eventId: normalizeReplayText(firstPresent(event?.eventId, payload.eventId)),
