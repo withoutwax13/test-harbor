@@ -12,7 +12,8 @@ const files = [
   "infra/db/migrations/006_batches_19_26.sql",
   "infra/db/migrations/007_project_ingest_tokens.sql",
   "infra/db/migrations/008_artifact_blobs_replay.sql",
-  "infra/db/migrations/009_replay_event_ordering.sql"
+  "infra/db/migrations/009_replay_event_ordering.sql",
+  "infra/db/migrations/010_replay_chunk_telemetry.sql"
 ];
 
 for (const file of files) {
