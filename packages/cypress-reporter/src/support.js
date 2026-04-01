@@ -7,24 +7,84 @@ function toIso(value = new Date()) {
 
 function truncateText(value, maxChars = 2000) {
   if (value == null) return '';
-  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  const text = typeof value === 'string' ? value : String(value);
   if (!text) return '';
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}…`;
 }
 
+function compactSerializable(value, options = {}, seen = new WeakSet(), depth = 0) {
+  const {
+    maxDepth = 4,
+    maxItems = 40,
+    maxKeys = 40,
+    maxString = 2000
+  } = options;
+
+  if (value == null) return value;
+  if (typeof value === 'string') return truncateText(value, maxString);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'bigint') return truncateText(value.toString(), maxString);
+  if (typeof value === 'function') return '[function]';
+  if (typeof value === 'symbol') return String(value);
+
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  if (value instanceof Error) {
+    return {
+      name: truncateText(value.name || 'Error', 120),
+      message: truncateText(value.message, maxString),
+      stack: truncateText(value.stack, maxString)
+    };
+  }
+
+  if (depth >= maxDepth) {
+    if (Array.isArray(value)) return `[array(${value.length}) depth-limit]`;
+    return '[object depth-limit]';
+  }
+
+  if (typeof value === 'object') {
+    if (seen.has(value)) return '[circular]';
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      const out = [];
+      const cap = Math.max(1, Math.min(maxItems, value.length));
+      for (let i = 0; i < cap; i += 1) {
+        out.push(compactSerializable(value[i], options, seen, depth + 1));
+      }
+      if (value.length > cap) out.push(`[truncated ${value.length - cap} items]`);
+      return out;
+    }
+
+    if (typeof ArrayBuffer !== 'undefined' && value instanceof ArrayBuffer) {
+      return { kind: 'ArrayBuffer', byteLength: value.byteLength };
+    }
+    if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView && ArrayBuffer.isView(value)) {
+      return { kind: value.constructor?.name || 'TypedArray', byteLength: value.byteLength };
+    }
+
+    const entries = Object.entries(value);
+    const out = {};
+    const cap = Math.max(1, Math.min(maxKeys, entries.length));
+    for (let i = 0; i < cap; i += 1) {
+      const [k, v] = entries[i];
+      out[k] = compactSerializable(v, options, seen, depth + 1);
+    }
+    if (entries.length > cap) out.__truncatedKeys = entries.length - cap;
+    return out;
+  }
+
+  return truncateText(String(value), maxString);
+}
+
 function serializeValue(value, maxChars = 2000) {
   try {
-    if (value instanceof Error) {
-      return {
-        name: value.name,
-        message: truncateText(value.message, maxChars),
-        stack: truncateText(value.stack, maxChars)
-      };
-    }
-    if (typeof value === 'string') return truncateText(value, maxChars);
-    if (typeof value === 'number' || typeof value === 'boolean' || value == null) return value;
-    return JSON.parse(truncateText(JSON.stringify(value), maxChars));
+    return compactSerializable(value, {
+      maxDepth: 4,
+      maxItems: 30,
+      maxKeys: 40,
+      maxString: Math.max(120, Math.min(Number(maxChars) || 2000, 8000))
+    });
   } catch {
     return truncateText(String(value), maxChars);
   }
@@ -452,11 +512,26 @@ export function installTestHarborReplayHooks(options = {}) {
 
   function normalizeLogMessage(messageValue) {
     if (Array.isArray(messageValue)) {
-      return truncateText(messageValue.map((part) => serializeValue(part, maxDetailChars)).join(' '), maxDetailChars);
+      const parts = [];
+      const cap = Math.min(messageValue.length, 12);
+      for (let i = 0; i < cap; i += 1) {
+        const chunk = serializeValue(messageValue[i], Math.max(200, Math.floor(maxDetailChars / 3)));
+        if (typeof chunk === 'string') parts.push(chunk);
+        else parts.push(truncateText(String(chunk == null ? '' : JSON.stringify(chunk)), Math.max(200, Math.floor(maxDetailChars / 3))));
+      }
+      if (messageValue.length > cap) parts.push(`…(+${messageValue.length - cap} more)`);
+      return truncateText(parts.join(' | '), maxDetailChars);
     }
     if (messageValue == null) return '';
     if (typeof messageValue === 'string') return truncateText(messageValue, maxDetailChars);
-    return truncateText(serializeValue(messageValue, maxDetailChars), maxDetailChars);
+
+    const serialized = serializeValue(messageValue, maxDetailChars);
+    if (typeof serialized === 'string') return truncateText(serialized, maxDetailChars);
+    try {
+      return truncateText(JSON.stringify(serialized), maxDetailChars);
+    } catch {
+      return truncateText(String(serialized), maxDetailChars);
+    }
   }
 
   Cypress.on('command:start', (command) => {
@@ -908,9 +983,15 @@ export function installTestHarborReplayHooks(options = {}) {
 
       win.addEventListener('unhandledrejection', (evt) => {
         const reason = evt?.reason;
+        const reasonSerialized = serializeValue(reason, maxDetailChars);
+        const reasonText = typeof reasonSerialized === 'string'
+          ? reasonSerialized
+          : (() => {
+            try { return JSON.stringify(reasonSerialized); } catch { return String(reasonSerialized); }
+          })();
         const message = typeof reason === 'string'
           ? reason
-          : (reason?.message || truncateText(JSON.stringify(reason || 'unknown'), maxDetailChars));
+          : (reason?.message || truncateText(reasonText || 'unknown', maxDetailChars));
         enqueue({
           type: 'replay.js.unhandledrejection',
           title: 'unhandledrejection',
@@ -1026,6 +1107,9 @@ export function installTestHarborReplayHooks(options = {}) {
             }
           });
         }
+      }).catch((error) => {
+        // eslint-disable-next-line no-console
+        console.warn('[testharbor] replay afterEach dom capture failed', error?.message || error);
       }).then(() => captureAndFlush());
     });
   }
