@@ -297,15 +297,31 @@ export function setupTestHarbor(on, config, options = {}) {
   let replayFlushInFlight = null;
   let replayFlushContext = {};
   let replayEventSeq = 0;
+  let pendingReplayMeta = {
+    clientChunkSeq: null,
+    compression: 'none',
+    encodedBytes: null,
+    droppedEvents: 0,
+    droppedEventsTotal: 0,
+    truncatedEvents: 0
+  };
 
   function pushReplayEvent(event = {}) {
     if (!event || typeof event !== 'object') return null;
     const payloadObj = event.payload && typeof event.payload === 'object' ? event.payload : null;
+    let payloadPreview = null;
+    if (payloadObj) {
+      try {
+        payloadPreview = asTrimmedString(JSON.stringify(payloadObj).slice(0, 1200));
+      } catch {
+        payloadPreview = '[payload_unserializable]';
+      }
+    }
     const detailFallback = asTrimmedString(event.detail)
       || asTrimmedString(event.message)
       || asTrimmedString(payloadObj?.detail)
       || asTrimmedString(payloadObj?.message)
-      || (payloadObj ? asTrimmedString(JSON.stringify(payloadObj).slice(0, 1200)) : null);
+      || payloadPreview;
 
     replayEventSeq += 1;
     const normalizedTs = toIso(event.ts || event.at || new Date());
@@ -346,6 +362,21 @@ export function setupTestHarbor(on, config, options = {}) {
     return enriched;
   }
 
+
+  function mergeReplayMeta(meta = {}) {
+    if (!meta || typeof meta !== 'object') return;
+    const asNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+    pendingReplayMeta = {
+      ...pendingReplayMeta,
+      ...(meta.clientChunkSeq != null ? { clientChunkSeq: Number(meta.clientChunkSeq) } : {}),
+      ...(meta.compression ? { compression: String(meta.compression) } : {}),
+      ...(meta.encodedBytes != null && Number.isFinite(Number(meta.encodedBytes)) ? { encodedBytes: Number(meta.encodedBytes) } : {}),
+      droppedEvents: Math.max(0, asNum(pendingReplayMeta.droppedEvents) + asNum(meta.droppedEvents)),
+      droppedEventsTotal: Math.max(asNum(pendingReplayMeta.droppedEventsTotal), asNum(meta.droppedEventsTotal), asNum(meta.droppedEvents)),
+      truncatedEvents: Math.max(0, asNum(pendingReplayMeta.truncatedEvents) + asNum(meta.truncatedEvents))
+    };
+  }
+
   function mergeReplayFlushContext(context = {}) {
     if (!context || typeof context !== 'object') return;
     replayFlushContext = {
@@ -353,6 +384,7 @@ export function setupTestHarbor(on, config, options = {}) {
       ...(context.specRunId ? { specRunId: context.specRunId } : {}),
       ...(context.testResultId ? { testResultId: context.testResultId } : {})
     };
+    if (context.replayMeta) mergeReplayMeta(context.replayMeta);
   }
 
 
@@ -377,6 +409,15 @@ export function setupTestHarbor(on, config, options = {}) {
       if (bytes >= replayMaxChunkBytes) break;
     }
     return out;
+  }
+
+
+  function estimateEventsBytes(events = []) {
+    try {
+      return Buffer.byteLength(JSON.stringify(events), 'utf8');
+    } catch {
+      return 0;
+    }
   }
 
   function clearReplayFlushTimer() {
@@ -409,16 +450,36 @@ export function setupTestHarbor(on, config, options = {}) {
     replayFlushContext = {};
 
     replayFlushInFlight = (async () => {
+      let firstBatch = true;
       while (replayQueue.length) {
         const events = drainReplayBatch();
         if (!events.length) break;
+        const encodedBytes = estimateEventsBytes(events);
+        const batchMeta = {
+          compression: pendingReplayMeta.compression || 'none',
+          encodedBytes,
+          droppedEvents: firstBatch ? Number(pendingReplayMeta.droppedEvents || 0) : 0,
+          droppedEventsTotal: firstBatch ? Number(pendingReplayMeta.droppedEventsTotal || 0) : Number(pendingReplayMeta.droppedEventsTotal || 0),
+          truncatedEvents: firstBatch ? Number(pendingReplayMeta.truncatedEvents || 0) : 0,
+          ...(firstBatch && pendingReplayMeta.clientChunkSeq != null ? { clientChunkSeq: Number(pendingReplayMeta.clientChunkSeq) } : {})
+        };
         await sendSafe(INGEST_EVENT_TYPES.REPLAY_CHUNK, {
           runId,
           ...(flushContext.specRunId ? { specRunId: flushContext.specRunId } : {}),
           ...(flushContext.testResultId ? { testResultId: flushContext.testResultId } : {}),
-          events
+          events,
+          meta: batchMeta
         });
+        firstBatch = false;
       }
+      pendingReplayMeta = {
+        clientChunkSeq: null,
+        compression: 'none',
+        encodedBytes: null,
+        droppedEvents: 0,
+        droppedEventsTotal: Number(pendingReplayMeta.droppedEventsTotal || 0),
+        truncatedEvents: 0
+      };
     })();
 
     try {
@@ -508,12 +569,15 @@ export function setupTestHarbor(on, config, options = {}) {
           });
         }
 
+        const replayMeta = entry.meta && typeof entry.meta === 'object' ? entry.meta : null;
         scheduleReplayFlush({
-          ...(flushSpecRunId ? { specRunId: flushSpecRunId } : {})
+          ...(flushSpecRunId ? { specRunId: flushSpecRunId } : {}),
+          ...(replayMeta ? { replayMeta } : {})
         });
         if (replayQueue.length >= replayMaxEventsPerChunk) {
           void flushReplayChunk({
-            ...(flushSpecRunId ? { specRunId: flushSpecRunId } : {})
+            ...(flushSpecRunId ? { specRunId: flushSpecRunId } : {}),
+            ...(replayMeta ? { replayMeta } : {})
           }).catch(() => {});
         }
       }

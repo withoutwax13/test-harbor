@@ -125,6 +125,26 @@ function normalizeReplayText(value) {
   return text ? text : null;
 }
 
+function clampNonNegativeInt(value, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.trunc(parsed));
+}
+
+function normalizeReplayChunkMeta(meta, events = []) {
+  const raw = meta && typeof meta === 'object' ? meta : {};
+  const inferredEncodedBytes = Buffer.byteLength(JSON.stringify(events || []), 'utf8');
+  return {
+    clientChunkSeq: normalizeReplaySeq(raw.clientChunkSeq),
+    clientChunkId: normalizeReplayText(raw.clientChunkId || raw.chunkId),
+    compression: normalizeReplayText(raw.compression) || 'none',
+    encodedBytes: clampNonNegativeInt(raw.encodedBytes, inferredEncodedBytes),
+    droppedEvents: clampNonNegativeInt(raw.droppedEvents, 0),
+    droppedEventsTotal: clampNonNegativeInt(raw.droppedEventsTotal, clampNonNegativeInt(raw.droppedEvents, 0)),
+    truncatedEvents: clampNonNegativeInt(raw.truncatedEvents, 0)
+  };
+}
+
 function normalizeReplayCaptureStatus(event) {
   const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {};
   const domCapture = payload.domCapture && typeof payload.domCapture === 'object'
@@ -143,8 +163,10 @@ function normalizeReplayCaptureStatus(event) {
   return 'available';
 }
 
-function normalizeReplayEventRecord(chunkPayload, event) {
+function normalizeReplayEventRecord(chunkPayload, event, chunkContext = {}) {
   const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {};
+  const payloadJson = JSON.stringify(event);
+  const receivedAt = chunkContext?.receivedAt || new Date().toISOString();
   return {
     runId: chunkPayload.runId,
     specRunId: firstPresent(event?.specRunId, payload.specRunId, chunkPayload.specRunId),
@@ -156,7 +178,10 @@ function normalizeReplayEventRecord(chunkPayload, event) {
     stepId: normalizeReplayText(firstPresent(event?.stepId, payload.stepId)),
     phase: normalizeReplayText(firstPresent(event?.phase, payload.phase)),
     captureStatus: normalizeReplayCaptureStatus(event),
-    payload: JSON.stringify(event)
+    serverReceivedAt: receivedAt,
+    payloadBytes: Buffer.byteLength(payloadJson, 'utf8'),
+    replayChunkId: chunkContext?.chunkId || null,
+    payload: payloadJson
   };
 }
 
@@ -546,15 +571,46 @@ async function handleEvent(type, payload) {
     case INGEST_EVENT_TYPES.REPLAY_CHUNK: {
       if (!requireKeys(payload, ['runId', 'events'])) throw new Error('replay.chunk missing required fields');
       const events = Array.isArray(payload.events) ? payload.events : [];
+      const receivedAt = new Date().toISOString();
+      const chunkId = crypto.randomUUID();
+      const meta = normalizeReplayChunkMeta(payload.meta, events);
+
+      await query(
+        `insert into replay_chunks(
+           id, run_id, spec_run_id, test_result_id,
+           client_chunk_seq, client_chunk_id,
+           compression, encoded_bytes,
+           event_count, dropped_events, dropped_events_total, truncated_events,
+           received_at, created_at
+         )
+         values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())`,
+        [
+          chunkId,
+          payload.runId,
+          payload.specRunId ?? null,
+          payload.testResultId ?? null,
+          meta.clientChunkSeq,
+          meta.clientChunkId,
+          meta.compression,
+          meta.encodedBytes,
+          events.length,
+          meta.droppedEvents,
+          meta.droppedEventsTotal,
+          meta.truncatedEvents,
+          receivedAt
+        ]
+      );
+
       for (const event of events) {
         if (!event || typeof event !== 'object') continue;
-        const normalizedEvent = normalizeReplayEventRecord(payload, event);
+        const normalizedEvent = normalizeReplayEventRecord(payload, event, { chunkId, receivedAt });
         await query(
           `insert into replay_events(
              run_id, spec_run_id, test_result_id, event_type, event_ts,
-             event_seq, event_id, step_id, phase, capture_status, payload
+             event_seq, event_id, step_id, phase, capture_status,
+             server_received_at, payload_bytes, replay_chunk_id, payload
            )
-           values($1,$2,$3,$4,coalesce($5::timestamptz, now()),$6,$7,$8,$9,$10,$11::jsonb)`,
+           values($1,$2,$3,$4,coalesce($5::timestamptz, now()),$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb)`,
           [
             normalizedEvent.runId,
             normalizedEvent.specRunId,
@@ -566,6 +622,9 @@ async function handleEvent(type, payload) {
             normalizedEvent.stepId,
             normalizedEvent.phase,
             normalizedEvent.captureStatus,
+            normalizedEvent.serverReceivedAt,
+            normalizedEvent.payloadBytes,
+            normalizedEvent.replayChunkId,
             normalizedEvent.payload
           ]
         );

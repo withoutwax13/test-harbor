@@ -477,6 +477,9 @@ export function installTestHarborReplayHooks(options = {}) {
   let mutationBuffer = [];
   let mutationFlushTimer = null;
   let mutationObserver = null;
+  let droppedEventsTotal = 0;
+  let droppedEventsSinceFlush = 0;
+  let replayChunkSeq = 0;
 
   function nextEventMeta(stepId, phase = 'event') {
     eventSeq += 1;
@@ -490,7 +493,11 @@ export function installTestHarborReplayHooks(options = {}) {
 
   function enqueue(event = {}) {
     if (!event || typeof event !== 'object') return;
-    if (queue.length >= maxEvents) queue.shift();
+    if (queue.length >= maxEvents) {
+      queue.shift();
+      droppedEventsTotal += 1;
+      droppedEventsSinceFlush += 1;
+    }
 
     const payload = event.payload && typeof event.payload === 'object' ? event.payload : null;
 
@@ -513,15 +520,62 @@ export function installTestHarborReplayHooks(options = {}) {
     });
   }
 
+
+  function estimatePayloadBytes(value) {
+    try {
+      const text = JSON.stringify(value);
+      if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text).length;
+      return text.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  function countLikelyTruncatedEvents(events) {
+    if (!Array.isArray(events) || !events.length) return 0;
+    let count = 0;
+    for (const event of events) {
+      const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {};
+      const domCapture = payload.domCapture && typeof payload.domCapture === 'object' ? payload.domCapture : {};
+      if (domCapture.degraded === true) {
+        count += 1;
+        continue;
+      }
+      if (payload.__truncatedKeys || payload.__truncatedItems || payload.__truncated) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
   function flushQueuedEvents() {
     flushMutationBatch();
     if (!queue.length) return cy.wrap(null, { log: false });
     const events = queue.splice(0, queue.length);
     const specPath = getSpecPath();
+    const droppedForChunk = droppedEventsSinceFlush;
+    const chunkSeq = replayChunkSeq + 1;
+    const encodedBytes = estimatePayloadBytes(events);
+    const truncatedEvents = countLikelyTruncatedEvents(events);
     return cy
-      .task('testharbor:replay', { specPath, events }, { log: false })
+      .task('testharbor:replay', {
+        specPath,
+        events,
+        meta: {
+          clientChunkSeq: chunkSeq,
+          compression: 'none',
+          encodedBytes,
+          droppedEvents: droppedForChunk,
+          droppedEventsTotal,
+          truncatedEvents
+        }
+      }, { log: false })
       .then(
-        () => null,
+        () => {
+          replayChunkSeq = chunkSeq;
+          droppedEventsSinceFlush = 0;
+          return null;
+        },
         (error) => {
           // restore events for next flush attempt (bounded by maxEvents)
           queue.unshift(...events);

@@ -161,13 +161,14 @@ function buildPageInfo(total, page, limit) {
   };
 }
 
-const REPLAY_CURSOR_VERSION = 1;
+const REPLAY_CURSOR_VERSION = 2;
 const REPLAY_NULL_SEQ_SORT = Number.MAX_SAFE_INTEGER;
 
 function encodeReplayCursor(cursor) {
   return Buffer.from(JSON.stringify({
     v: REPLAY_CURSOR_VERSION,
     sortSeq: Number(cursor?.sortSeq ?? REPLAY_NULL_SEQ_SORT),
+    sortReceivedAt: cursor?.sortReceivedAt || null,
     seq: cursor?.seq ?? null,
     id: Number(cursor?.id || 0)
   }), 'utf8').toString('base64url');
@@ -177,13 +178,16 @@ function decodeReplayCursor(value) {
   if (!value) return null;
   try {
     const decoded = JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8'));
-    if (Number(decoded?.v) !== REPLAY_CURSOR_VERSION) return null;
+    const version = Number(decoded?.v);
+    if (![1, REPLAY_CURSOR_VERSION].includes(version)) return null;
     const id = Number(decoded?.id);
     const sortSeq = Number(decoded?.sortSeq);
     if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(sortSeq)) return null;
+    const sortReceivedAt = decoded?.sortReceivedAt ? new Date(decoded.sortReceivedAt).toISOString() : null;
     return {
       id: Math.trunc(id),
       sortSeq: Math.trunc(sortSeq),
+      sortReceivedAt,
       seq: decoded?.seq == null ? null : Math.trunc(Number(decoded.seq))
     };
   } catch {
@@ -2371,10 +2375,25 @@ app.get('/v1/runs/:id/replay', { preHandler: workspaceGuard({ role: 'viewer', re
     [id]
   );
 
+  const chunkStatsRes = await query(
+    `select
+       count(*)::int as chunk_count,
+       coalesce(sum(event_count), 0)::bigint as chunk_event_count,
+       coalesce(sum(dropped_events), 0)::bigint as dropped_events,
+       coalesce(max(dropped_events_total), 0)::bigint as dropped_events_total,
+       coalesce(sum(truncated_events), 0)::bigint as truncated_events,
+       max(received_at) as last_received_at
+     from replay_chunks
+     where run_id = $1`,
+    [id]
+  );
+
   const { rows } = await query(
     `select
        id, run_id, spec_run_id, test_result_id, event_type, event_ts,
-       event_seq, event_id, step_id, phase, capture_status, payload, created_at
+       event_seq, event_id, step_id, phase, capture_status,
+       server_received_at, payload_bytes, replay_chunk_id,
+       payload, created_at
      from replay_events
      where run_id = $1
        and (
@@ -2382,12 +2401,21 @@ app.get('/v1/runs/:id/replay', { preHandler: workspaceGuard({ role: 'viewer', re
          or coalesce(event_seq, 9007199254740991::bigint) > $2
          or (
            coalesce(event_seq, 9007199254740991::bigint) = $2
-           and id > $3
+           and (
+             coalesce(server_received_at, created_at) > coalesce($3::timestamptz, to_timestamp(0))
+             or (
+               coalesce(server_received_at, created_at) = coalesce($3::timestamptz, to_timestamp(0))
+               and id > $4
+             )
+           )
          )
        )
-     order by coalesce(event_seq, 9007199254740991::bigint) asc, id asc
-     limit $4`,
-    [id, decodedCursor?.sortSeq ?? null, decodedCursor?.id ?? null, normalizedLimit + 1]
+     order by
+       coalesce(event_seq, 9007199254740991::bigint) asc,
+       coalesce(server_received_at, created_at) asc,
+       id asc
+     limit $5`,
+    [id, decodedCursor?.sortSeq ?? null, decodedCursor?.sortReceivedAt ?? null, decodedCursor?.id ?? null, normalizedLimit + 1]
   );
 
   const hasMore = rows.length > normalizedLimit;
@@ -2396,6 +2424,7 @@ app.get('/v1/runs/:id/replay', { preHandler: workspaceGuard({ role: 'viewer', re
   const nextCursor = hasMore && lastRow
     ? encodeReplayCursor({
         sortSeq: lastRow.event_seq == null ? REPLAY_NULL_SEQ_SORT : Number(lastRow.event_seq),
+        sortReceivedAt: lastRow.server_received_at || lastRow.created_at || null,
         seq: lastRow.event_seq == null ? null : Number(lastRow.event_seq),
         id: Number(lastRow.id)
       })
@@ -2410,6 +2439,14 @@ app.get('/v1/runs/:id/replay', { preHandler: workspaceGuard({ role: 'viewer', re
       status: run.status,
       branch: run.branch,
       commitSha: run.commit_sha
+    },
+    replayIngest: {
+      chunkCount: Number(chunkStatsRes.rows[0]?.chunk_count || 0),
+      chunkEventCount: Number(chunkStatsRes.rows[0]?.chunk_event_count || 0),
+      droppedEvents: Number(chunkStatsRes.rows[0]?.dropped_events || 0),
+      droppedEventsTotal: Number(chunkStatsRes.rows[0]?.dropped_events_total || 0),
+      truncatedEvents: Number(chunkStatsRes.rows[0]?.truncated_events || 0),
+      lastReceivedAt: chunkStatsRes.rows[0]?.last_received_at || null
     },
     events: pageRows,
     pageInfo: {
