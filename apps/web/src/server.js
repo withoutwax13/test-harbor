@@ -1248,7 +1248,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
         <div>
           <p class="eyebrow">Replay</p>
           <h2>Run ${escapeHtml(runId)} replay</h2>
-          <p>Step through Cypress runner events with cumulative console/network logs and exact-step DOM snapshots when available.</p>
+          <p>Step through Cypress-style command log + exact-step DOM snapshots. Video is optional and never the default replay source.</p>
         </div>
         <div class="hero-metrics">
           ${summaryCard('Captured events', String(normalized.length), normalized.length ? `From ${formatDate(normalized[0]?.ts)} to ${formatDate(normalized.at(-1)?.ts)}` : 'No replay events yet')}
@@ -1263,7 +1263,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
         <div class="panel-header">
           <div>
             <h2>Time travel</h2>
-            <p>Pick a spec/attempt, then scrub or play the timeline. Panels show Cypress-style command context, DOM, console, network, and runner logs for that selection.</p>
+            <p>Pick a spec/attempt, then scrub or play the timeline. Panels mirror Cypress Cloud flow: command timeline, DOM snapshot time-travel, then step-level event detail and logs.</p>
           </div>
           <a class="button button-secondary" href="/app/runs/${escapeHtml(runId)}">Back to run detail</a>
         </div>
@@ -1285,8 +1285,8 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               <label style="min-width: 170px;">
                 Visual source
                 <select id="replay-visual-source">
-                  <option value="video">Video (exact visual)</option>
-                  <option value="dom">DOM snapshot</option>
+                  <option value="dom">DOM snapshot (Cypress Cloud style)</option>
+                  <option value="video">Video (optional)</option>
                 </select>
               </label>
               <button type="button" class="button button-secondary" id="replay-play-pause">Play</button>
@@ -1311,6 +1311,8 @@ function renderRunReplayPage(shell, replayDetail, runId) {
               <small id="replay-visual-meta" class="replay-fit-note">Auto-fit keeps the full viewport visible at each step.</small>
             </div>
             <div class="panel replay-column replay-column-right">
+              <div class="panel-header compact"><strong>Step Event Detail</strong><small>Cypress-style selected command context</small></div>
+              <pre id="replay-event-detail" class="code-block replay-side-log">Select a step to inspect command/event details.</pre>
               <div class="panel-header compact"><strong>Element Inspector</strong><small id="replay-element-status">Waiting for step selection</small></div>
               <div id="replay-element-summary" class="empty-state"><p>Select a step to inspect target element metadata and replay fidelity.</p></div>
               <pre id="replay-element-meta" class="code-block replay-side-log">No target metadata yet.</pre>

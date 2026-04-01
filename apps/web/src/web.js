@@ -75,6 +75,7 @@ function initReplayPage() {
   const warningNode = document.getElementById('replay-step-warning');
   const meta = document.getElementById('replay-step-meta');
   const title = document.getElementById('replay-event-title');
+  const eventDetailNode = document.getElementById('replay-event-detail');
   const elementStatusNode = document.getElementById('replay-element-status');
   const elementSummaryNode = document.getElementById('replay-element-summary');
   const elementMetaNode = document.getElementById('replay-element-meta');
@@ -87,7 +88,7 @@ function initReplayPage() {
   const prevButton = document.getElementById('replay-step-prev');
   const nextButton = document.getElementById('replay-step-next');
 
-  if (!slider || !list || !frame || !videoNode || !frameStage || !meta || !title || !consoleNode || !networkNode || !runnerNode || !specSelect || !speedSelect || !playPauseButton || !prevButton || !nextButton || !warningNode || !elementStatusNode || !elementSummaryNode || !elementMetaNode) return;
+  if (!slider || !list || !frame || !videoNode || !frameStage || !meta || !title || !consoleNode || !networkNode || !runnerNode || !specSelect || !speedSelect || !playPauseButton || !prevButton || !nextButton || !warningNode || !eventDetailNode || !elementStatusNode || !elementSummaryNode || !elementMetaNode) return;
 
   function asObject(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -476,7 +477,7 @@ function initReplayPage() {
   let playbackTimer = null;
   let modalOpen = false;
   let activeSpecKey = '__all__';
-  let visualMode = allVideos.length ? 'video' : 'dom';
+  let visualMode = 'dom';
   let activeVideo = null;
   let currentViewport = { width: 1280, height: 720, url: '' };
   let manualInspectorSelection = null;
@@ -490,7 +491,7 @@ function initReplayPage() {
       if (videoOption) videoOption.textContent = 'Video (unavailable)';
       visualSourceSelect.disabled = true;
     } else {
-      visualSourceSelect.value = visualMode;
+      visualSourceSelect.value = 'dom';
     }
   }
 
@@ -989,6 +990,26 @@ function initReplayPage() {
 
     meta.textContent = (activeEvents.length ? idx + 1 : 0) + ' / ' + activeEvents.length;
     title.textContent = eventTitle + ' @ ' + safeIso(firstNonEmpty(event.ts, payload.ts, nested.ts));
+
+    const stepIdentity = extractStepIdentity(event);
+    const stepDetail = {
+      index: idx + 1,
+      total: activeEvents.length,
+      type: eventType,
+      title: eventTitle,
+      detail: eventDetail,
+      status: firstNonEmpty(payload.status, payload.state, nested.status, nested.state, null),
+      timing: {
+        ts: firstNonEmpty(event.ts, payload.ts, nested.ts, null),
+        wallClockStartedAt: firstNonEmpty(payload.wallClockStartedAt, nested.wallClockStartedAt, null),
+        wallClockEndedAt: firstNonEmpty(payload.wallClockEndedAt, nested.wallClockEndedAt, null),
+        elapsedMs: payload.elapsedMs ?? nested.elapsedMs ?? null
+      },
+      identity: stepIdentity,
+      target: extractTarget(event),
+      domCapture: extractDomMeta(event)
+    };
+    eventDetailNode.textContent = JSON.stringify(stepDetail, null, 2);
 
     const viewport = extractViewport(event);
     currentViewport = viewport;
