@@ -1281,7 +1281,7 @@ function renderRunReplayPage(shell, replayDetail, runId) {
                 <option value="3">3x</option>
               </select>
             </label>
-            <div class="row-actions" style="align-items:flex-end; justify-content:flex-end;">
+            <div class="row-actions" style="align-items:flex-end; justify-content:flex-end; flex-wrap:wrap; gap:8px;">
               <label style="min-width: 170px;">
                 Visual source
                 <select id="replay-visual-source">
@@ -1289,6 +1289,12 @@ function renderRunReplayPage(shell, replayDetail, runId) {
                   <option value="video">Video (optional)</option>
                 </select>
               </label>
+              <label style="min-width: 220px;">
+                Marker jump
+                <select id="replay-marker-select"></select>
+              </label>
+              <button type="button" class="button button-secondary" id="replay-marker-prev">Prev marker</button>
+              <button type="button" class="button button-secondary" id="replay-marker-next">Next marker</button>
               <button type="button" class="button button-secondary" id="replay-play-pause">Play</button>
               <button type="button" class="button button-secondary" id="replay-step-prev">Prev</button>
               <button type="button" class="button button-secondary" id="replay-step-next">Next</button>

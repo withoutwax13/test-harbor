@@ -72,6 +72,9 @@ function initReplayPage() {
   const modalToggleButton = document.getElementById('replay-toggle-modal');
   const visualSourceSelect = document.getElementById('replay-visual-source');
   const visualMetaNode = document.getElementById('replay-visual-meta');
+  const markerSelect = document.getElementById('replay-marker-select');
+  const markerPrevButton = document.getElementById('replay-marker-prev');
+  const markerNextButton = document.getElementById('replay-marker-next');
   const warningNode = document.getElementById('replay-step-warning');
   const meta = document.getElementById('replay-step-meta');
   const title = document.getElementById('replay-event-title');
@@ -474,7 +477,10 @@ function initReplayPage() {
   const allEvents = Array.isArray(events) ? events : [];
   const allVideos = Array.isArray(mediaPayload?.videos) ? mediaPayload.videos : [];
   let activeEvents = allEvents.slice();
-  let playbackTimer = null;
+  let playbackRaf = null;
+  let playbackState = null;
+  let markerEntries = [];
+  let eventTimelineMs = [];
   let modalOpen = false;
   let activeSpecKey = '__all__';
   let visualMode = 'dom';
@@ -496,10 +502,11 @@ function initReplayPage() {
   }
 
   function stopPlayback() {
-    if (playbackTimer) {
-      clearInterval(playbackTimer);
-      playbackTimer = null;
+    if (playbackRaf) {
+      cancelAnimationFrame(playbackRaf);
+      playbackRaf = null;
     }
+    playbackState = null;
     playPauseButton.textContent = 'Play';
   }
 
@@ -577,6 +584,99 @@ function initReplayPage() {
     if (value == null) return null;
     const n = Date.parse(String(value));
     return Number.isFinite(n) ? n : null;
+  }
+
+  function buildEventTimeline(items) {
+    const out = [];
+    let last = 0;
+    for (let i = 0; i < items.length; i += 1) {
+      const event = asObject(items[i]);
+      const payload = asObject(event.payload);
+      const nested = asObject(payload.payload);
+      const ts = toMillis(firstNonEmpty(event.ts, payload.ts, nested.ts));
+      if (ts == null) {
+        last += 300;
+        out.push(last);
+        continue;
+      }
+      if (!out.length) {
+        last = ts;
+      } else if (ts < last) {
+        last += 8;
+      } else {
+        last = ts;
+      }
+      out.push(last);
+    }
+    return out;
+  }
+
+  function isMarkerType(type) {
+    const low = String(type || '').toLowerCase();
+    return low.startsWith('replay.command')
+      || low.startsWith('replay.test')
+      || low.startsWith('replay.spec')
+      || low.startsWith('replay.run')
+      || low.startsWith('replay.js.error')
+      || low.includes('marker.');
+  }
+
+  function buildMarkerEntries(items) {
+    const out = [];
+    for (let i = 0; i < items.length; i += 1) {
+      const event = asObject(items[i]);
+      const payload = asObject(event.payload);
+      const nested = asObject(payload.payload);
+      const type = firstNonEmpty(event.type, payload.type, nested.type, 'replay.event');
+      if (!isMarkerType(type) && !isFailureEvent(event)) continue;
+      const title = firstNonEmpty(event.title, event.command, payload.displayName, payload.name, nested.name, payload.command, type);
+      const when = safeIso(firstNonEmpty(event.ts, payload.ts, nested.ts));
+      out.push({
+        index: i,
+        label: `${i + 1}. ${title} · ${String(type).replace(/^replay\./, '')} · ${when}`,
+        type,
+        ts: firstNonEmpty(event.ts, payload.ts, nested.ts)
+      });
+    }
+    if (!out.length && items.length) {
+      out.push({ index: 0, label: '1. Start of timeline', type: 'replay.start', ts: null });
+    }
+    return out;
+  }
+
+  function hydrateMarkerSelector() {
+    if (!markerSelect) return;
+    markerSelect.innerHTML = markerEntries
+      .map((marker) => `<option value="${marker.index}">${escapeHtmlInline(marker.label)}</option>`)
+      .join('');
+    markerSelect.disabled = markerEntries.length === 0;
+  }
+
+  function syncMarkerSelection(stepIndex) {
+    if (!markerSelect || !markerEntries.length) return;
+    let chosen = markerEntries[0];
+    for (const marker of markerEntries) {
+      if (marker.index <= stepIndex) chosen = marker;
+      else break;
+    }
+    markerSelect.value = String(chosen.index);
+  }
+
+  function jumpToMarker(direction) {
+    if (!markerEntries.length) return;
+    const current = Math.min(Math.max(Number(slider.value || 0), 0), Math.max(activeEvents.length - 1, 0));
+    let target = null;
+    if (direction > 0) {
+      target = markerEntries.find((marker) => marker.index > current) || markerEntries[markerEntries.length - 1];
+    } else {
+      for (let i = markerEntries.length - 1; i >= 0; i -= 1) {
+        if (markerEntries[i].index < current) { target = markerEntries[i]; break; }
+      }
+      if (!target) target = markerEntries[0];
+    }
+    stopPlayback();
+    slider.value = String(target.index);
+    renderCurrent();
   }
 
   function getSpecMetaFromKey(key) {
@@ -1083,6 +1183,63 @@ function initReplayPage() {
       if (isActive) activeButton.classList.add('replay-step-active');
       else activeButton.classList.remove('replay-step-active');
     }
+    syncMarkerSelection(idx);
+  }
+
+
+  function findTimelineIndexForVirtualMs(targetMs) {
+    if (!eventTimelineMs.length) return 0;
+    let lo = 0;
+    let hi = eventTimelineMs.length - 1;
+    let best = 0;
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const value = eventTimelineMs[mid];
+      if (value <= targetMs) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return best;
+  }
+
+  function startVirtualPlayback() {
+    if (!activeEvents.length) return;
+    stopPlayback();
+
+    const speed = Math.max(Number(speedSelect.value || 1), 0.25);
+    const current = Math.min(Math.max(Number(slider.value || 0), 0), Math.max(activeEvents.length - 1, 0));
+    const timelineNow = Number(eventTimelineMs[current] || 0);
+
+    playbackState = {
+      speed,
+      startPerf: performance.now(),
+      startVirtualMs: timelineNow,
+      currentIndex: current
+    };
+
+    playPauseButton.textContent = 'Pause';
+
+    const tick = (perfNow) => {
+      if (!playbackState) return;
+      const elapsedPerf = Math.max(0, perfNow - playbackState.startPerf);
+      const targetVirtualMs = playbackState.startVirtualMs + (elapsedPerf * playbackState.speed);
+      const nextIndex = findTimelineIndexForVirtualMs(targetVirtualMs);
+      if (nextIndex !== playbackState.currentIndex) {
+        playbackState.currentIndex = nextIndex;
+        slider.value = String(nextIndex);
+        renderCurrent();
+      }
+      if (nextIndex >= activeEvents.length - 1) {
+        stopPlayback();
+        return;
+      }
+      playbackRaf = requestAnimationFrame(tick);
+    };
+
+    playbackRaf = requestAnimationFrame(tick);
   }
 
   function applySpecSelection(key, keepPosition) {
@@ -1106,6 +1263,9 @@ function initReplayPage() {
     }
 
     if (specSelect.value !== selectedKey) specSelect.value = selectedKey;
+    eventTimelineMs = buildEventTimeline(activeEvents);
+    markerEntries = buildMarkerEntries(activeEvents);
+    hydrateMarkerSelector();
     stopPlayback();
     renderList();
     renderCurrent();
@@ -1117,7 +1277,7 @@ function initReplayPage() {
     const defaultSpecKey = specOptions.length > 1 ? specOptions[1].key : '__all__';
 
     specSelect.addEventListener('change', () => applySpecSelection(specSelect.value || '__all__', false));
-    slider.addEventListener('input', () => renderCurrent());
+    slider.addEventListener('input', () => { stopPlayback(); renderCurrent(); });
 
     prevButton.addEventListener('click', () => {
       stopPlayback();
@@ -1134,30 +1294,28 @@ function initReplayPage() {
     });
 
     playPauseButton.addEventListener('click', () => {
-      if (playbackTimer) {
+      if (playbackState) {
         stopPlayback();
         return;
       }
-
-      const speed = Math.max(Number(speedSelect.value || 1), 0.25);
-      const intervalMs = Math.max(80, Math.floor(380 / speed));
-      playPauseButton.textContent = 'Pause';
-
-      playbackTimer = setInterval(() => {
-        const current = Number(slider.value || 0);
-        const max = Math.max(activeEvents.length - 1, 0);
-        if (current >= max) {
-          stopPlayback();
-          return;
-        }
-        slider.value = String(current + 1);
-        renderCurrent();
-      }, intervalMs);
+      startVirtualPlayback();
     });
 
     speedSelect.addEventListener('change', () => {
-      if (playbackTimer) stopPlayback();
+      if (playbackState) startVirtualPlayback();
     });
+
+    if (markerSelect) {
+      markerSelect.addEventListener('change', () => {
+        const markerIndex = Math.min(Math.max(Number(markerSelect.value || 0), 0), Math.max(activeEvents.length - 1, 0));
+        stopPlayback();
+        slider.value = String(markerIndex);
+        renderCurrent();
+      });
+    }
+
+    if (markerPrevButton) markerPrevButton.addEventListener('click', () => jumpToMarker(-1));
+    if (markerNextButton) markerNextButton.addEventListener('click', () => jumpToMarker(1));
 
     if (visualSourceSelect) {
       visualSourceSelect.addEventListener('change', () => {
