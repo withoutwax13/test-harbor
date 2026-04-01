@@ -1332,7 +1332,7 @@ export function installTestHarborReplayHooks(options = {}) {
             }
           });
         }
-      }).catch((error) => {
+      }, (error) => {
         // eslint-disable-next-line no-console
         console.warn('[testharbor] replay afterEach dom capture failed', error?.message || error);
       }).then(() => captureAndFlush());
