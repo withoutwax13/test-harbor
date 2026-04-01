@@ -2375,48 +2375,110 @@ app.get('/v1/runs/:id/replay', { preHandler: workspaceGuard({ role: 'viewer', re
     [id]
   );
 
-  const chunkStatsRes = await query(
-    `select
-       count(*)::int as chunk_count,
-       coalesce(sum(event_count), 0)::bigint as chunk_event_count,
-       coalesce(sum(dropped_events), 0)::bigint as dropped_events,
-       coalesce(max(dropped_events_total), 0)::bigint as dropped_events_total,
-       coalesce(sum(truncated_events), 0)::bigint as truncated_events,
-       max(received_at) as last_received_at
-     from replay_chunks
-     where run_id = $1`,
-    [id]
-  );
+  const replayIngest = {
+    chunkCount: 0,
+    chunkEventCount: 0,
+    droppedEvents: 0,
+    droppedEventsTotal: 0,
+    truncatedEvents: 0,
+    lastReceivedAt: null
+  };
 
-  const { rows } = await query(
-    `select
-       id, run_id, spec_run_id, test_result_id, event_type, event_ts,
-       event_seq, event_id, step_id, phase, capture_status,
-       server_received_at, payload_bytes, replay_chunk_id,
-       payload, created_at
-     from replay_events
-     where run_id = $1
-       and (
-         $2::bigint is null
-         or coalesce(event_seq, 9007199254740991::bigint) > $2
-         or (
-           coalesce(event_seq, 9007199254740991::bigint) = $2
+  let supportsChunkTelemetry = true;
+  try {
+    const chunkStatsRes = await query(
+      `select
+         count(*)::int as chunk_count,
+         coalesce(sum(event_count), 0)::bigint as chunk_event_count,
+         coalesce(sum(dropped_events), 0)::bigint as dropped_events,
+         coalesce(max(dropped_events_total), 0)::bigint as dropped_events_total,
+         coalesce(sum(truncated_events), 0)::bigint as truncated_events,
+         max(received_at) as last_received_at
+       from replay_chunks
+       where run_id = $1`,
+      [id]
+    );
+
+    replayIngest.chunkCount = Number(chunkStatsRes.rows[0]?.chunk_count || 0);
+    replayIngest.chunkEventCount = Number(chunkStatsRes.rows[0]?.chunk_event_count || 0);
+    replayIngest.droppedEvents = Number(chunkStatsRes.rows[0]?.dropped_events || 0);
+    replayIngest.droppedEventsTotal = Number(chunkStatsRes.rows[0]?.dropped_events_total || 0);
+    replayIngest.truncatedEvents = Number(chunkStatsRes.rows[0]?.truncated_events || 0);
+    replayIngest.lastReceivedAt = chunkStatsRes.rows[0]?.last_received_at || null;
+  } catch (error) {
+    // Backward-compat for pre-010 schemas: keep replay endpoint functional without telemetry tables/columns.
+    if (error?.code === '42P01' || error?.code === '42703') {
+      supportsChunkTelemetry = false;
+    } else {
+      throw error;
+    }
+  }
+
+  let rows = [];
+
+  if (supportsChunkTelemetry) {
+    try {
+      const advancedRes = await query(
+        `select
+           id, run_id, spec_run_id, test_result_id, event_type, event_ts,
+           event_seq, event_id, step_id, phase, capture_status,
+           server_received_at, payload_bytes, replay_chunk_id,
+           payload, created_at
+         from replay_events
+         where run_id = $1
            and (
-             coalesce(server_received_at, created_at) > coalesce($3::timestamptz, to_timestamp(0))
+             $2::bigint is null
+             or coalesce(event_seq, 9007199254740991::bigint) > $2
              or (
-               coalesce(server_received_at, created_at) = coalesce($3::timestamptz, to_timestamp(0))
-               and id > $4
+               coalesce(event_seq, 9007199254740991::bigint) = $2
+               and (
+                 coalesce(server_received_at, created_at) > coalesce($3::timestamptz, to_timestamp(0))
+                 or (
+                   coalesce(server_received_at, created_at) = coalesce($3::timestamptz, to_timestamp(0))
+                   and id > $4
+                 )
+               )
              )
            )
-         )
-       )
-     order by
-       coalesce(event_seq, 9007199254740991::bigint) asc,
-       coalesce(server_received_at, created_at) asc,
-       id asc
-     limit $5`,
-    [id, decodedCursor?.sortSeq ?? null, decodedCursor?.sortReceivedAt ?? null, decodedCursor?.id ?? null, normalizedLimit + 1]
-  );
+         order by
+           coalesce(event_seq, 9007199254740991::bigint) asc,
+           coalesce(server_received_at, created_at) asc,
+           id asc
+         limit $5`,
+        [id, decodedCursor?.sortSeq ?? null, decodedCursor?.sortReceivedAt ?? null, decodedCursor?.id ?? null, normalizedLimit + 1]
+      );
+      rows = advancedRes.rows;
+    } catch (error) {
+      if (error?.code === '42703') {
+        supportsChunkTelemetry = false;
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  if (!supportsChunkTelemetry) {
+    const fallbackRes = await query(
+      `select
+         id, run_id, spec_run_id, test_result_id, event_type, event_ts,
+         null::bigint as event_seq,
+         null::text as event_id,
+         null::text as step_id,
+         null::text as phase,
+         null::text as capture_status,
+         created_at as server_received_at,
+         null::bigint as payload_bytes,
+         null::uuid as replay_chunk_id,
+         payload, created_at
+       from replay_events
+       where run_id = $1
+         and ($2::bigint is null or id > $2)
+       order by id asc
+       limit $3`,
+      [id, decodedCursor?.id ?? null, normalizedLimit + 1]
+    );
+    rows = fallbackRes.rows;
+  }
 
   const hasMore = rows.length > normalizedLimit;
   const pageRows = hasMore ? rows.slice(0, normalizedLimit) : rows;
@@ -2440,14 +2502,7 @@ app.get('/v1/runs/:id/replay', { preHandler: workspaceGuard({ role: 'viewer', re
       branch: run.branch,
       commitSha: run.commit_sha
     },
-    replayIngest: {
-      chunkCount: Number(chunkStatsRes.rows[0]?.chunk_count || 0),
-      chunkEventCount: Number(chunkStatsRes.rows[0]?.chunk_event_count || 0),
-      droppedEvents: Number(chunkStatsRes.rows[0]?.dropped_events || 0),
-      droppedEventsTotal: Number(chunkStatsRes.rows[0]?.dropped_events_total || 0),
-      truncatedEvents: Number(chunkStatsRes.rows[0]?.truncated_events || 0),
-      lastReceivedAt: chunkStatsRes.rows[0]?.last_received_at || null
-    },
+    replayIngest,
     events: pageRows,
     pageInfo: {
       total,
@@ -2455,7 +2510,8 @@ app.get('/v1/runs/:id/replay', { preHandler: workspaceGuard({ role: 'viewer', re
       returned: pageRows.length,
       hasMore,
       nextCursor,
-      truncated: hasMore || Boolean(decodedCursor)
+      truncated: hasMore || Boolean(decodedCursor) || !supportsChunkTelemetry,
+      compatMode: supportsChunkTelemetry ? 'full' : 'legacy_no_chunk_telemetry'
     }
   };
 });
