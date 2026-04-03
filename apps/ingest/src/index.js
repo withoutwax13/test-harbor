@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import pg from 'pg';
-import { INGEST_EVENT_TYPES, isValidIngestType } from '@testharbor/shared';
+import { INGEST_EVENT_TYPES, assertReplayV2ChunkPayload, isValidIngestType } from '@testharbor/shared';
 
 const app = Fastify({ logger: true });
 const port = Number(process.env.PORT || 4010);
@@ -43,7 +43,8 @@ const REQUIRED_FIELDS_BY_TYPE = {
   [INGEST_EVENT_TYPES.SPEC_FINISHED]: ['specRunId', 'status'],
   [INGEST_EVENT_TYPES.TEST_RESULT]: ['testResultId', 'specRunId', 'status'],
   [INGEST_EVENT_TYPES.ARTIFACT_REGISTERED]: ['artifactId', 'runId', 'type', 'storageKey'],
-  [INGEST_EVENT_TYPES.HEARTBEAT]: ['runId']
+  [INGEST_EVENT_TYPES.HEARTBEAT]: ['runId'],
+  [INGEST_EVENT_TYPES.REPLAY_V2_CHUNK]: ['runId', 'streamId', 'seqStart', 'seqEnd', 'events']
 };
 
 function missingKeys(obj, keys) {
@@ -55,6 +56,14 @@ function validatePayloadShape(type, payload) {
   const missing = missingKeys(payload, required);
   if (missing.length) {
     throw new ValidationError('payload_missing_required_fields', { type, missing });
+  }
+
+  if (type === INGEST_EVENT_TYPES.REPLAY_V2_CHUNK) {
+    try {
+      assertReplayV2ChunkPayload(payload);
+    } catch (error) {
+      throw new ValidationError(error.message, error.details || { type });
+    }
   }
 }
 
@@ -280,6 +289,17 @@ async function handleEvent(type, payload) {
       );
       return;
     }
+    case INGEST_EVENT_TYPES.REPLAY_V2_CHUNK: {
+      if (!requireKeys(payload, ['runId', 'streamId', 'seqStart', 'seqEnd', 'events'])) {
+        throw new Error('replay.v2.chunk missing required fields');
+      }
+      assertReplayV2ChunkPayload(payload);
+      const ctx = await lookupRunContextByRunId(payload.runId);
+      if (!ctx) {
+        throw new ValidationError('replay_v2_run_not_found', { runId: payload.runId });
+      }
+      return;
+    }
     default:
       throw new Error(`Unhandled event type: ${type}`);
   }
@@ -316,6 +336,13 @@ app.post('/v1/ingest/events', async (request, reply) => {
 
     return reply.code(result.duplicate ? 200 : 202).send({ ok: true, ...result });
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return reply.code(400).send({
+        error: 'validation_error',
+        message: error.message,
+        details: error.details
+      });
+    }
     const msg = String(error?.message || error);
     if (msg.includes('missing required fields')) {
       return reply.code(400).send({
