@@ -8,3 +8,4 @@ psql "${DATABASE_URL}" -f infra/db/migrations/005_batches_11_18.sql
 psql "${DATABASE_URL}" -f infra/db/migrations/006_batches_19_26.sql
 psql "${DATABASE_URL}" -f infra/db/migrations/007_project_ingest_tokens.sql
 psql "${DATABASE_URL}" -f infra/db/migrations/008_replay_v2_storage.sql
+psql "${DATABASE_URL}" -f infra/db/migrations/009_replay_v2_full_plan.sql

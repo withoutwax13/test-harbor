@@ -1,7 +1,17 @@
 import crypto from 'node:crypto';
 import Fastify from 'fastify';
 import pg from 'pg';
-import { INGEST_EVENT_TYPES, assertReplayV2ChunkPayload, isValidIngestType } from '@testharbor/shared';
+import {
+  INGEST_EVENT_TYPES,
+  REPLAY_V2_EVENT_KINDS,
+  REPLAY_V2_LIFECYCLE_EVENTS,
+  REPLAY_V2_SCHEMA_VERSION,
+  REPLAY_V2_SEEK_STRIDE,
+  applyReplayV2EventToTargetRegistry,
+  assertReplayV2ChunkPayload,
+  createReplayV2TargetRegistry,
+  isValidIngestType
+} from '@testharbor/shared';
 
 const app = Fastify({ logger: true });
 const port = Number(process.env.PORT || 4010);
@@ -278,12 +288,152 @@ async function lookupRunContextBySpecRunId(specRunId, db = pool) {
   return res.rows[0] || null;
 }
 
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function jsonClone(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function setDeepValue(target, path, value) {
+  if (!path.length) return value;
+  let cursor = target;
+  for (let i = 0; i < path.length - 1; i += 1) {
+    cursor = cursor[path[i]];
+  }
+  cursor[path[path.length - 1]] = value;
+  return target;
+}
+
+function isSensitiveAsset({ sourceUrl, mimeType }) {
+  const haystack = `${String(sourceUrl || '')} ${String(mimeType || '')}`.toLowerCase();
+  return ['token', 'secret', 'credential', 'session', 'cookie', 'authorization'].some((term) => haystack.includes(term));
+}
+
+function isAllowedAsset({ mimeType, byteSize }) {
+  const normalizedMime = String(mimeType || '').toLowerCase();
+  const allowedMime = !normalizedMime
+    || normalizedMime.startsWith('image/')
+    || normalizedMime.startsWith('font/')
+    || normalizedMime === 'text/css'
+    || normalizedMime === 'application/javascript'
+    || normalizedMime === 'text/javascript';
+  const allowedSize = byteSize == null || Number(byteSize) <= 10 * 1024 * 1024;
+  return allowedMime && allowedSize;
+}
+
+function collectAssetCandidates(value, path = [], assets = []) {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectAssetCandidates(item, [...path, index], assets));
+    return assets;
+  }
+
+  if (!value || typeof value !== 'object') return assets;
+
+  if (typeof value.url === 'string') {
+    assets.push({
+      path: [...path, 'url'],
+      sourceUrl: value.url,
+      mimeType: value.mimeType || value.contentType || null,
+      byteSize: value.byteSize || value.size || null,
+      contentBase64: value.contentBase64 || null,
+      body: typeof value.body === 'string' ? value.body : null
+    });
+  }
+
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'url') continue;
+    collectAssetCandidates(item, [...path, key], assets);
+  }
+  return assets;
+}
+
+async function rewritePayloadAssetsToCas(runId, payload, db) {
+  const rewritten = jsonClone(payload) || {};
+  const assetRefs = [];
+  for (const asset of collectAssetCandidates(rewritten)) {
+    const sourceMaterial = asset.contentBase64 || asset.body || asset.sourceUrl;
+    if (!sourceMaterial) continue;
+
+    const sha256 = sha256Hex(Buffer.isBuffer(sourceMaterial) ? sourceMaterial : String(sourceMaterial));
+    const casRef = `cas://sha256/${sha256}`;
+    const blocked = isSensitiveAsset(asset) || !isAllowedAsset(asset);
+    const blockReason = isSensitiveAsset(asset)
+      ? 'sensitive_asset_blocklist'
+      : (!isAllowedAsset(asset) ? 'asset_allowlist_reject' : null);
+
+    await db.query(
+      `insert into replay_v2_assets_cas (
+         run_id, sha256, source_url, cas_ref, mime_type, byte_size, blocked, block_reason, metadata_json
+       )
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+       on conflict (run_id, sha256)
+       do update set
+         source_url = coalesce(replay_v2_assets_cas.source_url, excluded.source_url),
+         mime_type = coalesce(replay_v2_assets_cas.mime_type, excluded.mime_type),
+         byte_size = coalesce(replay_v2_assets_cas.byte_size, excluded.byte_size),
+         blocked = replay_v2_assets_cas.blocked or excluded.blocked,
+         block_reason = coalesce(replay_v2_assets_cas.block_reason, excluded.block_reason),
+         metadata_json = coalesce(replay_v2_assets_cas.metadata_json, excluded.metadata_json)`,
+      [
+        runId,
+        sha256,
+        asset.sourceUrl,
+        casRef,
+        asset.mimeType,
+        asset.byteSize,
+        blocked,
+        blockReason,
+        JSON.stringify({ source: 'replay-v2', path: asset.path.join('.') })
+      ]
+    );
+
+    if (!blocked) {
+      setDeepValue(rewritten, asset.path, casRef);
+    }
+
+    assetRefs.push({
+      sourceUrl: asset.sourceUrl,
+      casRef,
+      sha256,
+      mimeType: asset.mimeType,
+      byteSize: asset.byteSize,
+      blocked,
+      blockReason
+    });
+  }
+
+  return { payload: rewritten, assetRefs };
+}
+
+async function loadReplayTargetRegistryState(runId, streamId, db) {
+  const { rows } = await db.query(
+    `select distinct on (target_id)
+        target_id, selector_version, state, selector_bundle, metadata_json, dom_signature_hash
+     from replay_v2_target_registry
+     where run_id = $1 and stream_id = $2
+     order by target_id, event_seq desc`,
+    [runId, streamId]
+  );
+
+  return rows.map((row) => ({
+    targetId: row.target_id,
+    selectorVersion: row.selector_version,
+    selectorBundle: row.selector_bundle || {},
+    metadata: row.metadata_json || null,
+    state: row.state,
+    reason: row.state === 'orphaned' ? row.metadata_json?.reason || null : null,
+    domSignatureHash: row.dom_signature_hash || null
+  }));
+}
+
 async function persistReplayV2Chunk(payload, idempotencyKey) {
   await withTransaction(async (db) => {
     await db.query('select pg_advisory_xact_lock(hashtext($1), hashtext($2))', [payload.runId, payload.streamId]);
 
     const existingChunk = await db.query(
-      `select run_id, stream_id, seq_start, seq_end
+      `select id, run_id, stream_id, seq_start, seq_end
        from replay_v2_chunks
        where idempotency_key = $1`,
       [idempotencyKey]
@@ -296,27 +446,34 @@ async function persistReplayV2Chunk(payload, idempotencyKey) {
 
     await db.query(
       `insert into replay_v2_streams (
-         run_id, stream_id, schema_version, started_at, metadata_json,
-         first_seq, last_seq, chunk_count, event_count, final_received, created_at, updated_at
+         run_id, stream_id, schema_version, started_at, metadata_json, protocol_version, transport_kind, harbor_root,
+         seek_stride, first_seq, last_seq, chunk_count, event_count, final_received, created_at, updated_at
        )
-       values ($1, $2, $3, $4::timestamptz, $5::jsonb, null, null, 0, 0, false, now(), now())
+       values ($1, $2, $3, $4::timestamptz, $5::jsonb, 'v2', $6, $7, $8, null, null, 0, 0, false, now(), now())
        on conflict (run_id, stream_id)
        do update set
          schema_version = excluded.schema_version,
          started_at = coalesce(replay_v2_streams.started_at, excluded.started_at),
          metadata_json = coalesce(replay_v2_streams.metadata_json, excluded.metadata_json),
+         transport_kind = coalesce(excluded.transport_kind, replay_v2_streams.transport_kind),
+         harbor_root = coalesce(excluded.harbor_root, replay_v2_streams.harbor_root),
+         seek_stride = coalesce(excluded.seek_stride, replay_v2_streams.seek_stride),
          updated_at = now()`,
       [
         payload.runId,
         payload.streamId,
-        payload.schemaVersion ?? '2.0',
+        payload.schemaVersion ?? REPLAY_V2_SCHEMA_VERSION,
         payload.startedAt ?? null,
-        JSON.stringify(payload.metadata ?? null)
+        JSON.stringify(payload.metadata ?? null),
+        payload.transport?.kind ?? 'ws+msgpack',
+        payload.transport?.harborRoot ?? null,
+        payload.seekStride ?? REPLAY_V2_SEEK_STRIDE
       ]
     );
 
     const stream = await db.query(
-      `select first_seq, last_seq, chunk_count, event_count, final_received
+      `select first_seq, last_seq, chunk_count, event_count, final_received, seek_stride,
+              actionable_command_count, aligned_command_count, target_resolved_count, orphan_count
        from replay_v2_streams
        where run_id = $1 and stream_id = $2
        for update`,
@@ -351,52 +508,179 @@ async function persistReplayV2Chunk(payload, idempotencyKey) {
 
     const chunkResult = await db.query(
       `insert into replay_v2_chunks (
-         run_id, stream_id, idempotency_key, schema_version,
-         seq_start, seq_end, event_count, chunk_index, final, started_at, payload_json
+         run_id, stream_id, idempotency_key, schema_version, seq_start, seq_end, event_count,
+         chunk_index, final, started_at, payload_json, harbor_segment_path, harbor_segment_index,
+         harbor_byte_offset, harbor_byte_length, frame_codec, acked, ack_meta_json
        )
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::timestamptz, $11::jsonb)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::timestamptz, $11::jsonb, $12, $13, $14, $15, $16, $17, $18::jsonb)
        returning id`,
       [
         payload.runId,
         payload.streamId,
         idempotencyKey,
-        payload.schemaVersion ?? '2.0',
+        payload.schemaVersion ?? REPLAY_V2_SCHEMA_VERSION,
         payload.seqStart,
         payload.seqEnd,
         payload.events.length,
         payload.chunkIndex ?? null,
         payload.final === true,
         payload.startedAt ?? null,
-        JSON.stringify(payload)
+        JSON.stringify(payload),
+        payload.transport?.segmentPath ?? null,
+        payload.transport?.segmentIndex ?? null,
+        payload.transport?.byteOffset ?? null,
+        payload.transport?.byteLength ?? null,
+        payload.transport?.codec ?? 'msgpack',
+        payload.transport?.ack?.ok === true,
+        JSON.stringify(payload.transport?.ack ?? null)
       ]
     );
     const chunkId = chunkResult.rows[0].id;
 
+    const registry = createReplayV2TargetRegistry({
+      initialState: await loadReplayTargetRegistryState(payload.runId, payload.streamId, db)
+    });
+    const stride = streamState?.seek_stride || payload.seekStride || REPLAY_V2_SEEK_STRIDE;
+    const seekRows = [];
+    const registryRows = [];
+    let actionableCommandCount = 0;
+    let alignedCommandCount = 0;
+    let targetResolvedCount = 0;
+    let orphanCount = 0;
+    let finSeq = null;
+    let ackSeq = null;
+    let lastCheckpointSeq = 0;
+
     const eventValues = [];
-    const eventPlaceholders = payload.events.map((event, index) => {
-      const offset = index * 10;
+    const eventPlaceholders = [];
+
+    for (const [index, inputEvent] of payload.events.entries()) {
+      const event = inputEvent;
+      const { payload: rewrittenPayload, assetRefs } = await rewritePayloadAssetsToCas(payload.runId, event.payload || {}, db);
+      const targetRef = event.targetRef || (event.targetId ? {
+        targetId: event.targetId,
+        selectorVersion: event.selectorVersion || event.selectorBundle?.selectorVersion || 1
+      } : null);
+      const lifecycleEvent = event.kind === REPLAY_V2_EVENT_KINDS.LIFECYCLE ? (rewrittenPayload.eventType || null) : null;
+      const domSignatureHash = rewrittenPayload.selectorBundle?.domSignature?.hash
+        || event.selectorBundle?.domSignature?.hash
+        || null;
+
+      const offset = index * 17;
       eventValues.push(
         payload.runId,
         payload.streamId,
         event.seq,
         event.kind,
-        event.ts,
-        event.monotonicMs,
-        event.targetId ?? null,
-        JSON.stringify(event.selectorBundle ?? null),
-        JSON.stringify(event.data ?? null),
-        chunkId
+        event.ts || payload.startedAt,
+        event.monotonicTs,
+        targetRef?.targetId ?? null,
+        JSON.stringify(event.selectorBundle ?? rewrittenPayload.selectorBundle ?? null),
+        JSON.stringify(rewrittenPayload),
+        chunkId,
+        event.commandId ?? null,
+        JSON.stringify(targetRef ?? null),
+        JSON.stringify(rewrittenPayload),
+        lifecycleEvent,
+        targetRef?.selectorVersion ?? null,
+        domSignatureHash,
+        JSON.stringify(assetRefs.length ? assetRefs : null)
       );
-      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::timestamptz, $${offset + 6}, $${offset + 7}, $${offset + 8}::jsonb, $${offset + 9}::jsonb, $${offset + 10})`;
-    });
+      eventPlaceholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::timestamptz, $${offset + 6}, $${offset + 7}, $${offset + 8}::jsonb, $${offset + 9}::jsonb, $${offset + 10}, $${offset + 11}, $${offset + 12}::jsonb, $${offset + 13}::jsonb, $${offset + 14}, $${offset + 15}, $${offset + 16}, $${offset + 17}::jsonb)`);
+
+      if (event.kind === REPLAY_V2_EVENT_KINDS.COMMAND && event.commandId) {
+        actionableCommandCount += 1;
+        if (targetRef?.targetId || rewrittenPayload.targetSnapshot) alignedCommandCount += 1;
+        if (!targetRef?.targetId || registry.get(targetRef.targetId)?.state !== 'orphaned') targetResolvedCount += 1;
+      }
+
+      if (event.kind === REPLAY_V2_EVENT_KINDS.LIFECYCLE) {
+        const nextTarget = applyReplayV2EventToTargetRegistry(registry, {
+          ...event,
+          payload: rewrittenPayload,
+          targetRef
+        });
+        if (nextTarget) {
+          registryRows.push([
+            payload.runId,
+            payload.streamId,
+            nextTarget.targetId,
+            nextTarget.selectorVersion,
+            nextTarget.state,
+            event.seq,
+            lifecycleEvent,
+            JSON.stringify(nextTarget.selectorBundle ?? null),
+            JSON.stringify(nextTarget.metadata ?? null),
+            nextTarget.selectorBundle?.domSignature?.hash || domSignatureHash || null
+          ]);
+          if (nextTarget.state === 'orphaned') orphanCount += 1;
+        }
+
+        if (lifecycleEvent === REPLAY_V2_LIFECYCLE_EVENTS.TRANSPORT_FIN) finSeq = event.seq;
+        if (lifecycleEvent === REPLAY_V2_LIFECYCLE_EVENTS.TRANSPORT_ACK) ackSeq = event.seq;
+      }
+
+      const shouldCheckpoint = !lastCheckpointSeq
+        || event.seq - lastCheckpointSeq >= stride
+        || String(lifecycleEvent || '').startsWith('TARGET_');
+      if (shouldCheckpoint) {
+        lastCheckpointSeq = event.seq;
+        seekRows.push([
+          payload.runId,
+          payload.streamId,
+          event.seq,
+          event.seq,
+          event.monotonicTs,
+          JSON.stringify(registry.snapshot())
+        ]);
+      }
+    }
 
     await db.query(
       `insert into replay_v2_events (
-         run_id, stream_id, seq, kind, ts, monotonic_ms, target_id, selector_bundle, data_json, chunk_id
+         run_id, stream_id, seq, kind, ts, monotonic_ms, target_id, selector_bundle, data_json, chunk_id,
+         command_id, target_ref, payload_json, lifecycle_event, selector_version, dom_signature_hash, asset_refs
        )
        values ${eventPlaceholders.join(', ')}`,
       eventValues
     );
+
+    if (registryRows.length) {
+      const registryValues = [];
+      const registryPlaceholders = registryRows.map((row, index) => {
+        const offset = index * 10;
+        registryValues.push(...row);
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}::jsonb, $${offset + 9}::jsonb, $${offset + 10})`;
+      });
+      await db.query(
+        `insert into replay_v2_target_registry (
+           run_id, stream_id, target_id, selector_version, state, event_seq, lifecycle_event, selector_bundle, metadata_json, dom_signature_hash
+         )
+         values ${registryPlaceholders.join(', ')}`,
+        registryValues
+      );
+    }
+
+    if (seekRows.length) {
+      const seekValues = [];
+      const seekPlaceholders = seekRows.map((row, index) => {
+        const offset = index * 6;
+        seekValues.push(...row);
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}::jsonb)`;
+      });
+      await db.query(
+        `insert into replay_v2_seek_index (
+           run_id, stream_id, checkpoint_seq, event_seq, monotonic_ms, target_registry_state_json
+         )
+         values ${seekPlaceholders.join(', ')}
+         on conflict (run_id, stream_id, checkpoint_seq)
+         do update set
+           event_seq = excluded.event_seq,
+           monotonic_ms = excluded.monotonic_ms,
+           target_registry_state_json = excluded.target_registry_state_json`,
+        seekValues
+      );
+    }
 
     await db.query(
       `update replay_v2_streams
@@ -405,9 +689,34 @@ async function persistReplayV2Chunk(payload, idempotencyKey) {
            chunk_count = chunk_count + 1,
            event_count = event_count + $5,
            final_received = final_received or $6,
+           fin_seq = coalesce($7, fin_seq),
+           ack_seq = coalesce($8, ack_seq),
+           ack_received = ack_received or ($8 is not null) or coalesce($9, false),
+           fin_ack_meta_json = coalesce($10::jsonb, fin_ack_meta_json),
+           actionable_command_count = actionable_command_count + $11,
+           aligned_command_count = aligned_command_count + $12,
+           target_resolved_count = target_resolved_count + $13,
+           orphan_count = orphan_count + $14,
+           target_registry_version = target_registry_version + $15,
            updated_at = now()
        where run_id = $1 and stream_id = $2`,
-      [payload.runId, payload.streamId, payload.seqStart, payload.seqEnd, payload.events.length, payload.final === true]
+      [
+        payload.runId,
+        payload.streamId,
+        payload.seqStart,
+        payload.seqEnd,
+        payload.events.length,
+        payload.final === true,
+        finSeq,
+        ackSeq,
+        payload.transport?.ack?.ok === true,
+        JSON.stringify(payload.transport?.ack ?? null),
+        actionableCommandCount,
+        alignedCommandCount,
+        targetResolvedCount,
+        orphanCount,
+        registryRows.length
+      ]
     );
   });
 }

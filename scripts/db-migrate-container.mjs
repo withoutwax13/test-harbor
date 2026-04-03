@@ -11,7 +11,8 @@ const files = [
   "infra/db/migrations/005_batches_11_18.sql",
   "infra/db/migrations/006_batches_19_26.sql",
   "infra/db/migrations/007_project_ingest_tokens.sql",
-  "infra/db/migrations/008_replay_v2_storage.sql"
+  "infra/db/migrations/008_replay_v2_storage.sql",
+  "infra/db/migrations/009_replay_v2_full_plan.sql"
 ];
 
 for (const file of files) {
