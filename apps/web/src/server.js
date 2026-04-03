@@ -930,11 +930,14 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
   });
 }
 
-function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStreamId, metricsResp, targetsResp, seekResp, seekSeq) {
+function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStreamId, metricsResp, targetsResp, seekResp, seekSeq, selectionMeta = {}) {
   const streams = streamsResp.items || [];
   const events = eventsResp.items || [];
   const pageInfo = eventsResp.pageInfo || { total: events.length, limit: events.length };
   const selectedStream = streams.find((stream) => stream.stream_id === selectedStreamId) || streams[0] || null;
+  const requestedStreamId = String(selectionMeta?.requestedStreamId || '').trim();
+  const requestedStreamFound = Boolean(selectionMeta?.requestedStreamFound);
+  const fallbackUsed = Boolean(selectionMeta?.fallbackUsed);
   const metrics = metricsResp?.item || null;
   const targets = targetsResp?.items || [];
   const seek = seekResp?.item || null;
@@ -959,9 +962,11 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
           ${summaryCard('Streams', String(streams.length), selectedStream ? `Selected: ${selectedStream.stream_id}` : 'No replay streams')}
           ${summaryCard('Events shown', String(events.length), `${pageInfo.total || 0} matching rows`)}
           ${summaryCard('Selection', selectedStreamId || 'none', selectedStream ? `Seq ${selectedStream.first_seq || 'n/a'}-${selectedStream.last_seq || 'n/a'}` : 'Select a stream')}
+          ${summaryCard('Requested', requestedStreamId || 'none', requestedStreamId ? (requestedStreamFound ? 'Matched stream' : 'Not found, fallback applied') : 'No streamId query')}
           ${summaryCard('Seek', seekSeq || 'n/a', inspect?.targetId ? `Inspect ${inspect.targetId}` : 'Nearest checkpoint resolution')}
         </div>
       </section>
+      ${fallbackUsed ? `<section class="panel" style="border-color:#f59e0b;"><div class="panel-header"><div><h2>Stream fallback applied</h2><p>Requested stream <code>${escapeHtml(requestedStreamId)}</code> was not found for this run. Showing <code>${escapeHtml(selectedStreamId || 'none')}</code> instead.</p></div></div></section>` : ''}
       <section class="panel">
         <div class="panel-header">
           <div>
@@ -970,7 +975,14 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
           </div>
           <a class="button button-secondary" href="/app/runs/${escapeHtml(String(runId))}">Back to run</a>
         </div>
-        ${streams.length ? `<div class="metrics-grid">
+        ${streams.length ? `<form method="GET" action="/app/runs/${encodeURIComponent(String(runId))}/replay-v2" style="display:flex; gap:0.75rem; align-items:end; margin:0 0 1rem;">
+          <label style="display:flex; flex-direction:column; gap:0.25rem;">Stream
+            <select name="streamId">
+              ${streams.map((stream) => `<option value="${escapeHtml(stream.stream_id)}"${stream.stream_id === selectedStreamId ? ' selected' : ''}>${escapeHtml(stream.stream_id)}</option>`).join('')}
+            </select>
+          </label>
+          <button class="button" type="submit">Open stream</button>
+        </form><div class="metrics-grid">
           ${streams.map((stream) => `<article class="summary-card">
             <span class="summary-label">${stream.stream_id === selectedStreamId ? 'Selected stream' : 'Replay stream'}</span>
             <strong><a class="text-link" href="/app/runs/${encodeURIComponent(String(runId))}/replay-v2?streamId=${encodeURIComponent(stream.stream_id)}">${escapeHtml(stream.stream_id)}</a></strong>
@@ -1733,9 +1745,16 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
   const streamsResp = await apiFetch(`/v1/runs/${request.params.id}/replay-v2/streams`, { token: shell.session.token });
   const streams = streamsResp.items || [];
   const requestedStreamId = String(request.query?.streamId || '').trim();
-  const selectedStreamId = streams.some((stream) => stream.stream_id === requestedStreamId)
-    ? requestedStreamId
-    : String(streams[0]?.stream_id || '');
+  const requestedStreamIdKey = requestedStreamId.toLowerCase();
+  const matchedRequestedStream = requestedStreamId
+    ? streams.find((stream) => String(stream.stream_id || '').toLowerCase() === requestedStreamIdKey)
+    : null;
+  const selectedStreamId = String((matchedRequestedStream || streams[0] || {}).stream_id || '');
+  const selectionMeta = {
+    requestedStreamId,
+    requestedStreamFound: Boolean(matchedRequestedStream),
+    fallbackUsed: Boolean(requestedStreamId) && !matchedRequestedStream && Boolean(selectedStreamId)
+  };
 
   let eventsResp = { items: [], pageInfo: { total: 0, limit: 300 } };
   let metricsResp = { item: null };
@@ -1773,7 +1792,8 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
     metricsResp,
     targetsResp,
     seekResp,
-    seekSeq
+    seekSeq,
+    selectionMeta
   ));
 });
 
