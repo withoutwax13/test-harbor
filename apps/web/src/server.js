@@ -2013,8 +2013,7 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
       if (error.statusCode !== 404) throw error;
     }
   } else {
-    const runDetail = await apiFetch(`/v1/runs/${request.params.id}`, { token: shell.session.token });
-    fallbackBundle = { runDetail };
+    fallbackBundle = null;
   }
 
   return reply.type('text/html').send(renderReplayV2Page(
