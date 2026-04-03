@@ -261,6 +261,11 @@ function metric(label, value) {
   return `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
 }
 
+function formatJsonInline(value) {
+  if (value === undefined || value === null) return '<span class="muted">n/a</span>';
+  return `<details><summary>view</summary><pre class="code-block">${escapeHtml(JSON.stringify(value, null, 2))}</pre></details>`;
+}
+
 function renderLayout({ title, shell, currentPath, content }) {
   const user = shell.session?.user;
   const workspaceName = shell.selectedWorkspace?.name || 'No workspace';
@@ -828,6 +833,15 @@ function renderRunDetailPage(shell, runDetail) {
           ${summaryCard('Artifacts', String(summary.artifacts.artifact_count || 0), formatBytes(summary.artifacts.total_artifact_bytes))}
         </div>
       </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Replay V2</h2>
+            <p>Open the persisted replay viewer for stream summaries and ordered replay events.</p>
+          </div>
+          <a class="button button-secondary" href="/app/runs/${item.id}/replay-v2">Open Replay V2</a>
+        </div>
+      </section>
       <div class="grid two-up">
         <section class="panel">
           <div class="panel-header"><div><h2>Specs</h2><p>All spec runs recorded for this run.</p></div></div>
@@ -912,6 +926,74 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
             </tr>`).join('')}
           </tbody>
         </table></div>` : '<div class="empty-state"><h3>No timeline events</h3><p>Events appear after run/spec/test/artifact ingest activity.</p></div>'}
+      </section>`
+  });
+}
+
+function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStreamId) {
+  const streams = streamsResp.items || [];
+  const events = eventsResp.items || [];
+  const pageInfo = eventsResp.pageInfo || { total: events.length, limit: events.length };
+  const selectedStream = streams.find((stream) => stream.stream_id === selectedStreamId) || streams[0] || null;
+
+  return renderLayout({
+    title: `Replay V2 ${String(runId).slice(0, 8)}`,
+    shell,
+    currentPath: '/app/runs',
+    content: `<section class="hero compact">
+        <div>
+          <p class="eyebrow">Replay V2</p>
+          <h2>Persisted replay streams for run <code>${escapeHtml(String(runId))}</code></h2>
+          <p>Read model over replay_v2_streams, replay_v2_chunks, and replay_v2_events for basic browser inspection.</p>
+        </div>
+        <div class="hero-metrics">
+          ${summaryCard('Streams', String(streams.length), selectedStream ? `Selected: ${selectedStream.stream_id}` : 'No replay streams')}
+          ${summaryCard('Events shown', String(events.length), `${pageInfo.total || 0} matching rows`)}
+          ${summaryCard('Selection', selectedStreamId || 'none', selectedStream ? `Seq ${selectedStream.first_seq || 'n/a'}-${selectedStream.last_seq || 'n/a'}` : 'Select a stream')}
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Streams</h2>
+            <p>Each card summarizes one persisted replay stream for this run.</p>
+          </div>
+          <a class="button button-secondary" href="/app/runs/${escapeHtml(String(runId))}">Back to run</a>
+        </div>
+        ${streams.length ? `<div class="metrics-grid">
+          ${streams.map((stream) => `<article class="summary-card">
+            <span class="summary-label">${stream.stream_id === selectedStreamId ? 'Selected stream' : 'Replay stream'}</span>
+            <strong><a class="text-link" href="/app/runs/${encodeURIComponent(String(runId))}/replay-v2?streamId=${encodeURIComponent(stream.stream_id)}">${escapeHtml(stream.stream_id)}</a></strong>
+            <small>Schema ${escapeHtml(stream.schema_version || '2.0')} · started ${escapeHtml(formatDate(stream.started_at))}</small>
+            <small>Seq ${escapeHtml(stream.first_seq ?? 'n/a')} → ${escapeHtml(stream.last_seq ?? 'n/a')}</small>
+            <small>${escapeHtml(stream.event_count)} events · ${escapeHtml(stream.chunk_count)} chunks · final ${stream.final_received ? 'yes' : 'no'}</small>
+            <small>Updated ${escapeHtml(formatDate(stream.updated_at))}</small>
+          </article>`).join('')}
+        </div>` : '<div class="empty-state"><h3>No replay streams</h3><p>This run has no persisted Replay V2 stream rows yet.</p></div>'}
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Events</h2>
+            <p>Ordered replay events for the selected stream. Default selection is the first stream for the run.</p>
+          </div>
+          ${selectedStream ? badge(`${pageInfo.total || 0} matching`, 'neutral') : ''}
+        </div>
+        ${!selectedStream ? '<div class="empty-state"><h3>No stream selected</h3><p>Select a replay stream to inspect ordered events.</p></div>' : events.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Seq</th><th>Kind</th><th>Timestamp</th><th>Monotonic</th><th>Target</th><th>Selector bundle</th><th>Data</th><th>Chunk</th></tr></thead>
+          <tbody>
+            ${events.map((event) => `<tr>
+              <td>${escapeHtml(event.seq)}</td>
+              <td><code>${escapeHtml(event.kind)}</code></td>
+              <td>${escapeHtml(formatDate(event.ts))}</td>
+              <td>${escapeHtml(`${event.monotonic_ms} ms`)}</td>
+              <td>${escapeHtml(event.target_id || 'n/a')}</td>
+              <td>${formatJsonInline(event.selector_bundle)}</td>
+              <td>${formatJsonInline(event.data_json)}</td>
+              <td>${event.chunk_id ? `<div><code>${escapeHtml(String(event.chunk_id).slice(0, 8))}</code><br/><small>index ${escapeHtml(event.chunk_index ?? 'n/a')} · final ${event.final ? 'yes' : 'no'}</small></div>` : 'n/a'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>` : '<div class="empty-state"><h3>No replay events</h3><p>The selected stream has no persisted events in the requested range.</p></div>'}
       </section>`
   });
 }
@@ -1564,6 +1646,23 @@ app.get('/app/runs/:id', async (request, reply) => {
   if (!shell.session) return requireSession(request, reply);
   const detail = await apiFetch(`/v1/runs/${request.params.id}`, { token: shell.session.token });
   return reply.type('text/html').send(renderRunDetailPage(shell, detail));
+});
+
+app.get('/app/runs/:id/replay-v2', async (request, reply) => {
+  const shell = await loadShellData(request);
+  if (!shell.session) return requireSession(request, reply);
+
+  const streamsResp = await apiFetch(`/v1/runs/${request.params.id}/replay-v2/streams`, { token: shell.session.token });
+  const streams = streamsResp.items || [];
+  const selectedStreamId = String(request.query?.streamId || streams[0]?.stream_id || '');
+  const eventsResp = selectedStreamId
+    ? await apiFetch(`/v1/runs/${request.params.id}/replay-v2/events?${new URLSearchParams({
+      streamId: selectedStreamId,
+      limit: '300'
+    }).toString()}`, { token: shell.session.token })
+    : { items: [], pageInfo: { total: 0, limit: 300 } };
+
+  return reply.type('text/html').send(renderReplayV2Page(shell, request.params.id, streamsResp, eventsResp, selectedStreamId));
 });
 
 

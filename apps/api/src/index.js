@@ -122,6 +122,16 @@ function buildPageInfo(total, page, limit) {
   };
 }
 
+function normalizeOptionalInt(value, { min = null, max = null } = {}) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  const normalized = Math.floor(parsed);
+  if (min !== null && normalized < min) return null;
+  if (max !== null && normalized > max) return null;
+  return normalized;
+}
+
 function deterministicUnit(seed, key) {
   const hex = hashText(`${seed}:${key}`).slice(0, 12);
   return Number.parseInt(hex, 16) / 0xffffffffffff;
@@ -1793,6 +1803,89 @@ app.get('/v1/runs/:id/summary', { preHandler: workspaceGuard({ role: 'viewer', r
   const runBundle = await fetchRunSummary(request.params.id);
   if (!runBundle) return reply.code(404).send({ error: 'not_found' });
   return runBundle;
+});
+
+app.get('/v1/runs/:id/replay-v2/streams', { preHandler: workspaceGuard({ role: 'viewer', resolveWorkspaceId: 'runParam' }) }, async (request, reply) => {
+  const run = await fetchRun(request.params.id);
+  if (!run) return reply.code(404).send({ error: 'not_found' });
+
+  const { rows } = await query(
+    `select stream_id, schema_version, started_at, first_seq, last_seq, chunk_count,
+            event_count, final_received, updated_at
+     from replay_v2_streams
+     where run_id = $1
+     order by started_at asc nulls last, stream_id asc`,
+    [request.params.id]
+  );
+
+  return {
+    items: rows,
+    pageInfo: buildPageInfo(rows.length, 1, Math.max(rows.length, 1))
+  };
+});
+
+app.get('/v1/runs/:id/replay-v2/events', { preHandler: workspaceGuard({ role: 'viewer', resolveWorkspaceId: 'runParam' }) }, async (request, reply) => {
+  const run = await fetchRun(request.params.id);
+  if (!run) return reply.code(404).send({ error: 'not_found' });
+
+  const streamId = String(request.query?.streamId || '').trim();
+  if (!streamId) return reply.code(400).send({ error: 'stream_id_required' });
+
+  const fromSeq = normalizeOptionalInt(request.query?.fromSeq, { min: 1 });
+  const toSeq = normalizeOptionalInt(request.query?.toSeq, { min: 1 });
+  const normalizedLimit = normalizeLimit(request.query?.limit, 300, 1000);
+
+  if ((request.query?.fromSeq ?? '') !== '' && fromSeq === null) {
+    return reply.code(400).send({ error: 'invalid_from_seq' });
+  }
+  if ((request.query?.toSeq ?? '') !== '' && toSeq === null) {
+    return reply.code(400).send({ error: 'invalid_to_seq' });
+  }
+  if (fromSeq !== null && toSeq !== null && fromSeq > toSeq) {
+    return reply.code(400).send({ error: 'invalid_seq_range' });
+  }
+
+  const streamRes = await query(
+    `select stream_id
+     from replay_v2_streams
+     where run_id = $1 and stream_id = $2`,
+    [request.params.id, streamId]
+  );
+  if (!streamRes.rows.length) return reply.code(404).send({ error: 'not_found' });
+
+  const totalRes = await query(
+    `select count(*)::int as total
+     from replay_v2_events
+     where run_id = $1
+       and stream_id = $2
+       and ($3::int is null or seq >= $3)
+       and ($4::int is null or seq <= $4)`,
+    [request.params.id, streamId, fromSeq, toSeq]
+  );
+
+  const { rows } = await query(
+    `select e.seq, e.kind, e.ts, e.monotonic_ms, e.target_id, e.selector_bundle,
+            e.data_json, e.chunk_id, c.chunk_index, c.final
+     from replay_v2_events e
+     left join replay_v2_chunks c on c.id = e.chunk_id
+     where e.run_id = $1
+       and e.stream_id = $2
+       and ($3::int is null or e.seq >= $3)
+       and ($4::int is null or e.seq <= $4)
+     order by e.seq asc
+     limit $5`,
+    [request.params.id, streamId, fromSeq, toSeq, normalizedLimit]
+  );
+
+  return {
+    items: rows,
+    pageInfo: {
+      ...buildPageInfo(totalRes.rows[0]?.total, 1, normalizedLimit),
+      streamId,
+      fromSeq,
+      toSeq
+    }
+  };
 });
 
 app.get('/v1/runs/:runId/specs', { preHandler: workspaceGuard({ role: 'viewer', resolveWorkspaceId: async (request) => resolveWorkspaceIdFromRequestPart(request, 'runParam') }) }, async (request, reply) => {
