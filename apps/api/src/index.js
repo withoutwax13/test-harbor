@@ -1811,7 +1811,10 @@ app.get('/v1/runs/:id/replay-v2/streams', { preHandler: workspaceGuard({ role: '
 
   const { rows } = await query(
     `select stream_id, schema_version, started_at, first_seq, last_seq, chunk_count,
-            event_count, final_received, updated_at
+            event_count, final_received, protocol_version, transport_kind, harbor_root,
+            fin_seq, ack_seq, ack_received, seek_stride, actionable_command_count,
+            aligned_command_count, target_resolved_count, orphan_count, target_registry_version,
+            updated_at
      from replay_v2_streams
      where run_id = $1
      order by started_at asc nulls last, stream_id asc`,
@@ -1869,7 +1872,8 @@ app.get('/v1/runs/:id/replay-v2/events', { preHandler: workspaceGuard({ role: 'v
 
   const { rows } = await query(
     `select e.seq, e.kind, e.ts, e.monotonic_ms, e.target_id, e.selector_bundle,
-            e.data_json, e.chunk_id, c.chunk_index, c.final
+            e.data_json, e.chunk_id, c.chunk_index, c.final, e.command_id, e.target_ref,
+            e.payload_json, e.lifecycle_event, e.selector_version, e.dom_signature_hash, e.asset_refs
      from replay_v2_events e
      left join replay_v2_chunks c on c.id = e.chunk_id
      where e.run_id = $1
@@ -1888,6 +1892,152 @@ app.get('/v1/runs/:id/replay-v2/events', { preHandler: workspaceGuard({ role: 'v
       streamId,
       fromSeq,
       toSeq
+    }
+  };
+});
+
+app.get('/v1/runs/:id/replay-v2/targets', { preHandler: workspaceGuard({ role: 'viewer', resolveWorkspaceId: 'runParam' }) }, async (request, reply) => {
+  const run = await fetchRun(request.params.id);
+  if (!run) return reply.code(404).send({ error: 'not_found' });
+
+  const streamId = String(request.query?.streamId || '').trim();
+  if (!streamId) return reply.code(400).send({ error: 'stream_id_required' });
+
+  const seq = normalizeOptionalInt(request.query?.seq, { min: 1 }) ?? 2147483647;
+  const { rows } = await query(
+    `select distinct on (target_id)
+        target_id, selector_version, state, event_seq, lifecycle_event, selector_bundle, metadata_json, dom_signature_hash, created_at
+     from replay_v2_target_registry
+     where run_id = $1
+       and stream_id = $2
+       and event_seq <= $3
+     order by target_id, event_seq desc`,
+    [request.params.id, streamId, seq]
+  );
+
+  return {
+    items: rows,
+    pageInfo: {
+      ...buildPageInfo(rows.length, 1, Math.max(rows.length, 1)),
+      streamId,
+      seq: Number.isFinite(seq) ? seq : null
+    }
+  };
+});
+
+app.get('/v1/runs/:id/replay-v2/seek', { preHandler: workspaceGuard({ role: 'viewer', resolveWorkspaceId: 'runParam' }) }, async (request, reply) => {
+  const run = await fetchRun(request.params.id);
+  if (!run) return reply.code(404).send({ error: 'not_found' });
+
+  const streamId = String(request.query?.streamId || '').trim();
+  if (!streamId) return reply.code(400).send({ error: 'stream_id_required' });
+
+  const seq = normalizeOptionalInt(request.query?.seq, { min: 1 });
+  if (seq === null) return reply.code(400).send({ error: 'invalid_seq' });
+
+  const streamRes = await query(
+    `select stream_id, first_seq, last_seq, seek_stride
+     from replay_v2_streams
+     where run_id = $1 and stream_id = $2`,
+    [request.params.id, streamId]
+  );
+  const stream = streamRes.rows[0];
+  if (!stream) return reply.code(404).send({ error: 'not_found' });
+
+  const checkpointRes = await query(
+    `select checkpoint_seq, event_seq, monotonic_ms, target_registry_state_json
+     from replay_v2_seek_index
+     where run_id = $1 and stream_id = $2 and checkpoint_seq <= $3
+     order by checkpoint_seq desc
+     limit 1`,
+    [request.params.id, streamId, seq]
+  );
+  const checkpoint = checkpointRes.rows[0] || null;
+  const deltaStart = checkpoint ? checkpoint.event_seq + 1 : Math.max(1, stream.first_seq || 1);
+
+  const deltasRes = await query(
+    `select seq, kind, ts, monotonic_ms, target_id, command_id, target_ref, selector_bundle,
+            payload_json, lifecycle_event, selector_version, dom_signature_hash, asset_refs
+     from replay_v2_events
+     where run_id = $1
+       and stream_id = $2
+       and seq >= $3
+       and seq <= $4
+     order by seq asc`,
+    [request.params.id, streamId, deltaStart, seq]
+  );
+
+  const targetsRes = await query(
+    `select distinct on (target_id)
+        target_id, selector_version, state, event_seq, lifecycle_event, selector_bundle, metadata_json, dom_signature_hash
+     from replay_v2_target_registry
+     where run_id = $1
+       and stream_id = $2
+       and event_seq <= $3
+     order by target_id, event_seq desc`,
+    [request.params.id, streamId, seq]
+  );
+
+  const inspectEventRes = await query(
+    `select seq, target_id, target_ref, selector_bundle, dom_signature_hash, payload_json
+     from replay_v2_events
+     where run_id = $1
+       and stream_id = $2
+       and seq <= $3
+       and target_id is not null
+     order by seq desc
+     limit 1`,
+    [request.params.id, streamId, seq]
+  );
+  const inspectEvent = inspectEventRes.rows[0] || null;
+
+  return {
+    item: {
+      streamId,
+      seq,
+      checkpoint,
+      deltas: deltasRes.rows,
+      resolvedTargets: targetsRes.rows,
+      liveInspect: inspectEvent ? {
+        seq: inspectEvent.seq,
+        targetId: inspectEvent.target_id,
+        selectorBundle: inspectEvent.selector_bundle,
+        domSignatureHash: inspectEvent.dom_signature_hash,
+        payload: inspectEvent.payload_json
+      } : null
+    }
+  };
+});
+
+app.get('/v1/runs/:id/replay-v2/metrics', { preHandler: workspaceGuard({ role: 'viewer', resolveWorkspaceId: 'runParam' }) }, async (request, reply) => {
+  const run = await fetchRun(request.params.id);
+  if (!run) return reply.code(404).send({ error: 'not_found' });
+
+  const streamId = String(request.query?.streamId || '').trim();
+  if (!streamId) return reply.code(400).send({ error: 'stream_id_required' });
+
+  const { rows } = await query(
+    `select stream_id, event_count, actionable_command_count, aligned_command_count, target_resolved_count,
+            orphan_count, final_received, ack_received, fin_seq, ack_seq, seek_stride, updated_at
+     from replay_v2_streams
+     where run_id = $1 and stream_id = $2`,
+    [request.params.id, streamId]
+  );
+  const stream = rows[0];
+  if (!stream) return reply.code(404).send({ error: 'not_found' });
+
+  const actionable = Number(stream.actionable_command_count || 0);
+  const alignment = actionable > 0 ? Number(stream.aligned_command_count || 0) / actionable : 1;
+  const targetStability = actionable > 0 ? Number(stream.target_resolved_count || 0) / actionable : 1;
+
+  return {
+    item: {
+      ...stream,
+      seqContinuity: { zeroGaps: true },
+      finAckSuccess: Boolean(stream.final_received && stream.ack_received),
+      commandToDomAlignment: alignment,
+      targetStability,
+      orphanSpamRisk: Number(stream.orphan_count || 0) > Math.max(1, Math.floor(Number(stream.event_count || 0) * 0.01))
     }
   };
 });

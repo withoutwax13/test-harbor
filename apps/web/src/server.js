@@ -930,11 +930,17 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
   });
 }
 
-function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStreamId) {
+function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStreamId, metricsResp, targetsResp, seekResp, seekSeq) {
   const streams = streamsResp.items || [];
   const events = eventsResp.items || [];
   const pageInfo = eventsResp.pageInfo || { total: events.length, limit: events.length };
   const selectedStream = streams.find((stream) => stream.stream_id === selectedStreamId) || streams[0] || null;
+  const metrics = metricsResp?.item || null;
+  const targets = targetsResp?.items || [];
+  const seek = seekResp?.item || null;
+  const inspect = seek?.liveInspect || null;
+  const alignmentPct = metrics ? `${Math.round((metrics.commandToDomAlignment || 0) * 100)}%` : 'n/a';
+  const targetPct = metrics ? `${Math.round((metrics.targetStability || 0) * 100)}%` : 'n/a';
 
   return renderLayout({
     title: `Replay V2 ${String(runId).slice(0, 8)}`,
@@ -950,6 +956,7 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
           ${summaryCard('Streams', String(streams.length), selectedStream ? `Selected: ${selectedStream.stream_id}` : 'No replay streams')}
           ${summaryCard('Events shown', String(events.length), `${pageInfo.total || 0} matching rows`)}
           ${summaryCard('Selection', selectedStreamId || 'none', selectedStream ? `Seq ${selectedStream.first_seq || 'n/a'}-${selectedStream.last_seq || 'n/a'}` : 'Select a stream')}
+          ${summaryCard('Seek', seekSeq || 'n/a', inspect?.targetId ? `Inspect ${inspect.targetId}` : 'Nearest checkpoint resolution')}
         </div>
       </section>
       <section class="panel">
@@ -967,9 +974,53 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
             <small>Schema ${escapeHtml(stream.schema_version || '2.0')} · started ${escapeHtml(formatDate(stream.started_at))}</small>
             <small>Seq ${escapeHtml(stream.first_seq ?? 'n/a')} → ${escapeHtml(stream.last_seq ?? 'n/a')}</small>
             <small>${escapeHtml(stream.event_count)} events · ${escapeHtml(stream.chunk_count)} chunks · final ${stream.final_received ? 'yes' : 'no'}</small>
+            <small>${escapeHtml(stream.transport_kind || 'ws+msgpack')} · ACK ${stream.ack_received ? 'yes' : 'no'} · stride ${escapeHtml(stream.seek_stride ?? '50')}</small>
             <small>Updated ${escapeHtml(formatDate(stream.updated_at))}</small>
           </article>`).join('')}
         </div>` : '<div class="empty-state"><h3>No replay streams</h3><p>This run has no persisted Replay V2 stream rows yet.</p></div>'}
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Gate Metrics</h2>
+            <p>Acceptance-gate read model for FIN/ACK, alignment, target stability, and orphan pressure.</p>
+          </div>
+          ${metrics ? badge(metrics.finAckSuccess ? 'FIN/ACK ok' : 'FIN/ACK pending', metrics.finAckSuccess ? 'success' : 'warning') : ''}
+        </div>
+        ${metrics ? `<div class="metrics-grid">
+          ${summaryCard('FIN/ACK', metrics.finAckSuccess ? '100%' : 'pending', `FIN ${metrics.fin_seq || 'n/a'} · ACK ${metrics.ack_seq || 'n/a'}`)}
+          ${summaryCard('Cmd→DOM', alignmentPct, `${metrics.aligned_command_count || 0}/${metrics.actionable_command_count || 0} actionable`)}
+          ${summaryCard('Target Stability', targetPct, `${metrics.target_resolved_count || 0}/${metrics.actionable_command_count || 0} resolved`)}
+          ${summaryCard('Orphans', String(metrics.orphan_count || 0), metrics.orphanSpamRisk ? 'Above normal-run threshold' : 'Within normal-run threshold')}
+        </div>` : '<div class="empty-state"><h3>No metrics</h3><p>Select a replay stream to inspect gate metrics.</p></div>'}
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Seek + Live Inspect</h2>
+            <p>Nearest checkpoint plus forward deltas. Target resolution is evaluated at the requested sequence.</p>
+          </div>
+          ${selectedStream ? `<form method="GET" action="/app/runs/${encodeURIComponent(String(runId))}/replay-v2" style="display:flex; gap:0.75rem; align-items:end;">
+            <input type="hidden" name="streamId" value="${escapeHtml(selectedStreamId)}" />
+            <label>Seq<input name="seq" type="number" min="1" value="${escapeHtml(String(seekSeq || selectedStream.last_seq || 1))}" /></label>
+            <button class="button" type="submit">Seek</button>
+          </form>` : ''}
+        </div>
+        ${seek ? `<div class="metrics-grid">
+          ${summaryCard('Checkpoint', String(seek.checkpoint?.checkpoint_seq || seek.seq), seek.checkpoint ? `${seek.deltas.length} forward deltas` : 'No prior checkpoint')}
+          ${summaryCard('Resolved targets', String(seek.resolvedTargets.length), inspect?.targetId ? `Inspecting ${inspect.targetId}` : 'No target at seek seq')}
+          ${summaryCard('Live Inspect', inspect?.domSignatureHash ? inspect.domSignatureHash.slice(0, 12) : 'n/a', inspect?.selectorBundle ? 'Selector bundle ready' : 'No inspect target')}
+        </div>
+        ${inspect ? `<div class="table-wrap"><table>
+          <thead><tr><th>Seq</th><th>Target</th><th>DOM signature</th><th>Selector bundle</th><th>Payload</th></tr></thead>
+          <tbody><tr>
+            <td>${escapeHtml(inspect.seq)}</td>
+            <td><code>${escapeHtml(inspect.targetId)}</code></td>
+            <td>${escapeHtml(inspect.domSignatureHash || 'n/a')}</td>
+            <td>${formatJsonInline(inspect.selectorBundle)}</td>
+            <td>${formatJsonInline(inspect.payload)}</td>
+          </tr></tbody>
+        </table></div>` : '<div class="empty-state"><h3>No inspect target</h3><p>No target-backed event exists at or before the selected sequence.</p></div>'}` : '<div class="empty-state"><h3>No seek state</h3><p>Select a stream and sequence to compute synchronized replay state.</p></div>'}
       </section>
       <section class="panel">
         <div class="panel-header">
@@ -980,20 +1031,43 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
           ${selectedStream ? badge(`${pageInfo.total || 0} matching`, 'neutral') : ''}
         </div>
         ${!selectedStream ? '<div class="empty-state"><h3>No stream selected</h3><p>Select a replay stream to inspect ordered events.</p></div>' : events.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Seq</th><th>Kind</th><th>Timestamp</th><th>Monotonic</th><th>Target</th><th>Selector bundle</th><th>Data</th><th>Chunk</th></tr></thead>
+          <thead><tr><th>Seq</th><th>Kind</th><th>Timestamp</th><th>Monotonic</th><th>Command</th><th>Target</th><th>Payload</th><th>Chunk</th></tr></thead>
           <tbody>
             ${events.map((event) => `<tr>
               <td>${escapeHtml(event.seq)}</td>
               <td><code>${escapeHtml(event.kind)}</code></td>
               <td>${escapeHtml(formatDate(event.ts))}</td>
               <td>${escapeHtml(`${event.monotonic_ms} ms`)}</td>
-              <td>${escapeHtml(event.target_id || 'n/a')}</td>
-              <td>${formatJsonInline(event.selector_bundle)}</td>
-              <td>${formatJsonInline(event.data_json)}</td>
+              <td>${escapeHtml(event.command_id || 'n/a')}</td>
+              <td>${event.target_id ? `<div><code>${escapeHtml(event.target_id)}</code><br/><small>v${escapeHtml(event.selector_version || '1')} · ${escapeHtml(event.lifecycle_event || 'active')}</small></div>` : 'n/a'}</td>
+              <td>${formatJsonInline(event.payload_json || event.data_json)}</td>
               <td>${event.chunk_id ? `<div><code>${escapeHtml(String(event.chunk_id).slice(0, 8))}</code><br/><small>index ${escapeHtml(event.chunk_index ?? 'n/a')} · final ${event.final ? 'yes' : 'no'}</small></div>` : 'n/a'}</td>
             </tr>`).join('')}
           </tbody>
         </table></div>` : '<div class="empty-state"><h3>No replay events</h3><p>The selected stream has no persisted events in the requested range.</p></div>'}
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Target Registry</h2>
+            <p>Resolved logical targets at the selected sequence with selector bundle versions and DOM signatures.</p>
+          </div>
+          ${selectedStream ? badge(`${targets.length} targets`, 'neutral') : ''}
+        </div>
+        ${!selectedStream ? '<div class="empty-state"><h3>No stream selected</h3><p>Select a replay stream to inspect target registry state.</p></div>' : targets.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Target</th><th>Version</th><th>State</th><th>Lifecycle</th><th>Seq</th><th>DOM signature</th><th>Selectors</th></tr></thead>
+          <tbody>
+            ${targets.map((target) => `<tr>
+              <td><code>${escapeHtml(target.target_id)}</code></td>
+              <td>${escapeHtml(target.selector_version)}</td>
+              <td>${escapeHtml(target.state)}</td>
+              <td>${escapeHtml(target.lifecycle_event)}</td>
+              <td>${escapeHtml(target.event_seq)}</td>
+              <td>${escapeHtml(target.dom_signature_hash || 'n/a')}</td>
+              <td>${formatJsonInline(target.selector_bundle)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>` : '<div class="empty-state"><h3>No targets</h3><p>No target registry rows exist for the selected stream and sequence.</p></div>'}
       </section>`
   });
 }
@@ -1660,18 +1734,43 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
     : String(streams[0]?.stream_id || '');
 
   let eventsResp = { items: [], pageInfo: { total: 0, limit: 300 } };
+  let metricsResp = { item: null };
+  let targetsResp = { items: [] };
+  let seekResp = { item: null };
+  const seekSeq = String(request.query?.seq || '').trim();
   if (selectedStreamId) {
     try {
       eventsResp = await apiFetch(`/v1/runs/${request.params.id}/replay-v2/events?${new URLSearchParams({
         streamId: selectedStreamId,
         limit: '300'
       }).toString()}`, { token: shell.session.token });
+      metricsResp = await apiFetch(`/v1/runs/${request.params.id}/replay-v2/metrics?${new URLSearchParams({
+        streamId: selectedStreamId
+      }).toString()}`, { token: shell.session.token });
+      targetsResp = await apiFetch(`/v1/runs/${request.params.id}/replay-v2/targets?${new URLSearchParams({
+        streamId: selectedStreamId,
+        ...(seekSeq ? { seq: seekSeq } : {})
+      }).toString()}`, { token: shell.session.token });
+      seekResp = await apiFetch(`/v1/runs/${request.params.id}/replay-v2/seek?${new URLSearchParams({
+        streamId: selectedStreamId,
+        seq: seekSeq || String(streams.find((stream) => stream.stream_id === selectedStreamId)?.last_seq || 1)
+      }).toString()}`, { token: shell.session.token });
     } catch (error) {
       if (error.statusCode !== 404) throw error;
     }
   }
 
-  return reply.type('text/html').send(renderReplayV2Page(shell, request.params.id, streamsResp, eventsResp, selectedStreamId));
+  return reply.type('text/html').send(renderReplayV2Page(
+    shell,
+    request.params.id,
+    streamsResp,
+    eventsResp,
+    selectedStreamId,
+    metricsResp,
+    targetsResp,
+    seekResp,
+    seekSeq
+  ));
 });
 
 
