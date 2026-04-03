@@ -115,6 +115,31 @@ function formatBytes(bytes) {
   return `${size.toFixed(size >= 100 ? 0 : 1)} ${unit}`;
 }
 
+function getArtifactMediaKind(artifact) {
+  const type = String(artifact?.type || '').toLowerCase();
+  const contentType = String(artifact?.content_type || '').toLowerCase();
+  if (type.includes('video') || contentType.startsWith('video/')) return 'video';
+  if (type.includes('image') || type.includes('screenshot') || contentType.startsWith('image/')) return 'image';
+  return '';
+}
+
+function summarizeErrorSnippet(value, fallback = '') {
+  const snippet = String(value || fallback || '').replace(/\s+/g, ' ').trim();
+  return snippet ? snippet.slice(0, 180) : 'n/a';
+}
+
+function sanitizeMediaUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.toString();
+    return '';
+  } catch {
+    return '';
+  }
+}
+
 function slugify(value, fallback = 'item') {
   const slug = String(value || '')
     .toLowerCase()
@@ -930,7 +955,7 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
   });
 }
 
-function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStreamId, metricsResp, targetsResp, seekResp, seekSeq, selectionMeta = {}, eventSeq = '') {
+function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStreamId, metricsResp, targetsResp, seekResp, seekSeq, selectionMeta = {}, eventSeq = '', fallbackBundle = null) {
   const streams = streamsResp.items || [];
   const events = eventsResp.items || [];
   const pageInfo = eventsResp.pageInfo || { total: events.length, limit: events.length };
@@ -942,6 +967,41 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
   const targets = targetsResp?.items || [];
   const seek = seekResp?.item || null;
   const inspect = seek?.liveInspect || null;
+  const fallbackRunDetail = fallbackBundle?.runDetail || null;
+  const fallbackMedia = fallbackBundle?.media || [];
+  const fallbackVideos = fallbackMedia.filter((artifact) => artifact.mediaKind === 'video');
+  const fallbackImages = fallbackMedia.filter((artifact) => artifact.mediaKind === 'image');
+  const fallbackTests = fallbackRunDetail?.tests || [];
+  const fallbackSpecs = fallbackRunDetail?.specs || [];
+  const fallbackArtifacts = fallbackRunDetail?.artifacts || [];
+  const fallbackFailures = fallbackTests.filter((test) => String(test.status || '').toLowerCase() === 'failed');
+  const fallbackFlaky = fallbackTests.filter((test) => String(test.status || '').toLowerCase() === 'flaky');
+  const fallbackTimeline = fallbackRunDetail ? [
+    ...fallbackSpecs.map((spec) => ({
+      ts: spec.finished_at || spec.started_at || spec.created_at,
+      status: spec.status || 'unknown',
+      title: spec.spec_path || spec.id || 'spec',
+      file: spec.spec_path || 'n/a',
+      error: spec.error_message || ''
+    })),
+    ...fallbackTests.map((test) => ({
+      ts: test.created_at || test.finished_at || test.started_at,
+      status: test.status || 'unknown',
+      title: test.test_title || test.test_case_id || test.id || 'test',
+      file: test.file_path || 'n/a',
+      error: test.error_message || test.stacktrace || ''
+    })),
+    ...fallbackArtifacts.map((artifact) => ({
+      ts: artifact.created_at,
+      status: getArtifactMediaKind(artifact) || artifact.type || 'artifact',
+      title: artifact.type || artifact.id || 'artifact',
+      file: artifact.content_type || 'application/octet-stream',
+      error: 'artifact registered'
+    }))
+  ]
+    .filter((entry) => entry.ts)
+    .sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
+    .slice(0, 60) : [];
   const alignmentPct = metrics ? `${Math.round((metrics.commandToDomAlignment || 0) * 100)}%` : 'n/a';
   const targetPct = metrics ? `${Math.round((metrics.targetStability || 0) * 100)}%` : 'n/a';
   const seqContinuityText = metrics
@@ -1023,8 +1083,64 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
             <small>${escapeHtml(stream.transport_kind || 'ws+msgpack')} · ACK ${stream.ack_received ? 'yes' : 'no'} · stride ${escapeHtml(stream.seek_stride ?? '50')}</small>
             <small>Updated ${escapeHtml(formatDate(stream.updated_at))}</small>
           </article>`).join('')}
-        </div>` : '<div class="empty-state"><h3>No replay streams</h3><p>This run has no persisted <code>replay.v2.chunk</code> data yet. If you are using the local smoke flow, ensure it emits replay chunks for the created run before <code>run.finished</code>.</p></div>'}
+        </div>` : '<div class="empty-state"><h3>No replay streams</h3><p>No persisted <code>replay.v2.chunk</code> data exists for this run. Use the artifact-backed replay section below to triage the run, or verify replay chunk ingest before <code>run.finished</code>.</p></div>'}
       </section>
+      ${!streams.length && fallbackRunDetail ? `<section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Cypress-Style Replay (artifact-backed)</h2>
+            <p>No persisted replay streams were found for this run. Using run artifacts, specs, and tests for browser triage instead.</p>
+          </div>
+          <a class="button button-secondary" href="/app/runs/${escapeHtml(String(runId))}">Back to run</a>
+        </div>
+        <div class="metrics-grid">
+          ${summaryCard('Videos', String(fallbackVideos.length), fallbackVideos.some((artifact) => !artifact.signedUrl) ? 'Some videos unavailable' : 'Signed video playback ready')}
+          ${summaryCard('Screenshots', String(fallbackImages.length), fallbackImages.some((artifact) => !artifact.signedUrl) ? 'Some screenshots unavailable' : 'Signed image preview ready')}
+          ${summaryCard('Tests', String(fallbackTests.length), `${fallbackSpecs.length} specs recorded`)}
+          ${summaryCard('Failures', String(fallbackFailures.length), `${fallbackFlaky.length} flaky`)}
+        </div>
+        ${fallbackVideos.length ? `<div style="display:grid; gap:1rem; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); margin-top:1rem;">
+          ${fallbackVideos.map((artifact) => artifact.signedUrl
+            ? `<article class="summary-card" style="align-items:stretch;">
+              <span class="summary-label">${escapeHtml(artifact.type || 'video')}</span>
+              <strong>${escapeHtml(artifact.fileLabel || artifact.id)}</strong>
+              <video controls preload="metadata" src="${escapeHtml(artifact.signedUrl)}" style="width:100%; border-radius:14px; background:#0f172a; margin-top:0.75rem;"></video>
+              <small>${escapeHtml(formatBytes(artifact.byte_size))} · ${escapeHtml(formatDate(artifact.created_at))}</small>
+              <small><a class="text-link" href="/app/artifacts/${encodeURIComponent(String(artifact.id))}">Artifact details</a></small>
+            </article>`
+            : `<article class="summary-card"><span class="summary-label">${escapeHtml(artifact.type || 'video')}</span><strong>${escapeHtml(artifact.fileLabel || artifact.id)}</strong><small>Signed download unavailable. <a class="text-link" href="/app/artifacts/${encodeURIComponent(String(artifact.id))}">Open artifact details</a>.</small></article>`).join('')}
+        </div>` : '<div class="empty-state"><h3>No videos</h3><p>No video artifacts were registered for this run.</p></div>'}
+        ${fallbackImages.length ? `<div style="margin-top:1.25rem;">
+          <h3 style="margin:0 0 0.75rem;">Screenshots</h3>
+          <div style="display:grid; gap:0.75rem; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));">
+            ${fallbackImages.map((artifact) => artifact.signedUrl
+              ? `<a href="${escapeHtml(artifact.signedUrl)}" target="_blank" rel="noreferrer" style="display:block; text-decoration:none; color:inherit;">
+                <article class="summary-card" style="align-items:stretch;">
+                  <img src="${escapeHtml(artifact.signedUrl)}" alt="${escapeHtml(artifact.fileLabel || artifact.type || 'screenshot')}" style="width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:12px; background:#dbe4ea;" />
+                  <strong style="margin-top:0.75rem;">${escapeHtml(artifact.fileLabel || artifact.id)}</strong>
+                  <small>${escapeHtml(formatDate(artifact.created_at))}</small>
+                  <small><span class="text-link">Open full image</span></small>
+                </article>
+              </a>`
+              : `<article class="summary-card"><span class="summary-label">${escapeHtml(artifact.type || 'screenshot')}</span><strong>${escapeHtml(artifact.fileLabel || artifact.id)}</strong><small>Signed download unavailable. <a class="text-link" href="/app/artifacts/${encodeURIComponent(String(artifact.id))}">Open artifact details</a>.</small></article>`).join('')}
+          </div>
+        </div>` : '<div class="empty-state"><h3>No screenshots</h3><p>No screenshot artifacts were registered for this run.</p></div>'}
+        <div style="margin-top:1.25rem;">
+          <h3 style="margin:0 0 0.75rem;">Test timeline</h3>
+          ${fallbackTimeline.length ? `<div class="table-wrap"><table>
+            <thead><tr><th>Time</th><th>Status</th><th>Title</th><th>File</th><th>Error snippet</th></tr></thead>
+            <tbody>
+              ${fallbackTimeline.map((entry) => `<tr>
+                <td>${escapeHtml(formatDate(entry.ts))}</td>
+                <td>${badge(entry.status, formatRunState(entry.status))}</td>
+                <td>${escapeHtml(entry.title)}</td>
+                <td>${escapeHtml(entry.file)}</td>
+                <td>${escapeHtml(summarizeErrorSnippet(entry.error))}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table></div>` : '<div class="empty-state"><h3>No test timeline</h3><p>Run detail did not include specs, tests, or artifacts to build the fallback timeline.</p></div>'}
+        </div>
+      </section>` : ''}
       <section class="panel">
         <div class="panel-header">
           <div>
@@ -1834,6 +1950,7 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
   let metricsResp = { item: null };
   let targetsResp = { items: [] };
   let seekResp = { item: null };
+  let fallbackBundle = null;
   const seekSeq = String(request.query?.seq || '').trim();
   const eventSeq = String(request.query?.eventSeq || '').trim();
   if (selectedStreamId) {
@@ -1856,6 +1973,33 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
     } catch (error) {
       if (error.statusCode !== 404) throw error;
     }
+  } else {
+    const runDetail = await apiFetch(`/v1/runs/${request.params.id}`, { token: shell.session.token });
+    const mediaArtifacts = (runDetail.artifacts || [])
+      .map((artifact) => ({ ...artifact, mediaKind: getArtifactMediaKind(artifact) }))
+      .filter((artifact) => artifact.mediaKind)
+      .slice(0, 12);
+
+    const media = await Promise.all(mediaArtifacts.map(async (artifact) => {
+      try {
+        const detail = await apiFetch(`/v1/artifacts/${artifact.id}/sign-download`, { token: shell.session.token });
+        return {
+          ...artifact,
+          fileLabel: artifact.path || artifact.file_path || artifact.type || artifact.id,
+          signedUrl: sanitizeMediaUrl(detail?.download?.url || ''),
+          downloadExpiresAt: detail?.download?.expiresAt || ''
+        };
+      } catch {
+        return {
+          ...artifact,
+          fileLabel: artifact.path || artifact.file_path || artifact.type || artifact.id,
+          signedUrl: '',
+          downloadExpiresAt: ''
+        };
+      }
+    }));
+
+    fallbackBundle = { runDetail, media };
   }
 
   return reply.type('text/html').send(renderReplayV2Page(
@@ -1869,7 +2013,8 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
     seekResp,
     seekSeq,
     selectionMeta,
-    eventSeq
+    eventSeq,
+    fallbackBundle
   ));
 });
 
