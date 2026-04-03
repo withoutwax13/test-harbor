@@ -128,16 +128,75 @@ function summarizeErrorSnippet(value, fallback = '') {
   return snippet ? snippet.slice(0, 180) : 'n/a';
 }
 
-function sanitizeMediaUrl(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  try {
-    const parsed = new URL(raw);
-    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.toString();
-    return '';
-  } catch {
-    return '';
-  }
+function formatFallbackStepTone(status, kind = '') {
+  const normalizedStatus = String(status || '').toLowerCase();
+  if (normalizedStatus === 'failed') return 'danger';
+  if (normalizedStatus === 'flaky') return 'warning';
+  if (normalizedStatus === 'passed') return 'success';
+  if (normalizedStatus === 'running' || normalizedStatus === 'pending') return 'warning';
+  if (String(kind || '').startsWith('artifact')) return 'neutral';
+  return 'neutral';
+}
+
+function buildFallbackReplaySteps(runDetail) {
+  const specs = runDetail?.specs || [];
+  const tests = runDetail?.tests || [];
+  const artifacts = runDetail?.artifacts || [];
+  const stepCandidates = [
+    ...specs.map((spec, index) => ({
+      ts: spec.finished_at || spec.started_at || spec.created_at || '',
+      orderGroup: 1,
+      orderIndex: index,
+      kind: 'spec',
+      status: spec.status || 'unknown',
+      title: spec.spec_path || spec.id || `spec-${index + 1}`,
+      file: spec.spec_path || 'n/a',
+      error: spec.error_message || '',
+      detail: `attempts=${spec.attempts || 0} • duration=${formatDuration(spec.duration_ms)}`,
+      rawId: spec.id || spec.spec_path || `spec-${index + 1}`
+    })),
+    ...tests.map((test, index) => ({
+      ts: test.created_at || test.finished_at || test.started_at || '',
+      orderGroup: 2,
+      orderIndex: index,
+      kind: 'test',
+      status: test.status || 'unknown',
+      title: test.test_title || test.test_case_id || test.id || `test-${index + 1}`,
+      file: test.file_path || 'n/a',
+      error: test.error_message || test.stacktrace || '',
+      detail: [
+        test.test_case_id ? `case=${test.test_case_id}` : '',
+        test.stacktrace ? 'stacktrace captured' : '',
+        test.error_message ? summarizeErrorSnippet(test.error_message) : ''
+      ].filter(Boolean).join(' • ') || 'No extra test detail',
+      rawId: test.id || test.test_case_id || test.test_title || `test-${index + 1}`
+    })),
+    ...artifacts.map((artifact, index) => ({
+      ts: artifact.created_at || '',
+      orderGroup: 3,
+      orderIndex: index,
+      kind: 'artifact',
+      status: getArtifactMediaKind(artifact) || artifact.type || 'registered',
+      title: artifact.path || artifact.file_path || artifact.type || artifact.id || `artifact-${index + 1}`,
+      file: artifact.content_type || 'application/octet-stream',
+      error: '',
+      detail: `${formatBytes(artifact.byte_size)} • ${artifact.id || 'artifact'} registered`,
+      rawId: artifact.id || artifact.path || artifact.file_path || `artifact-${index + 1}`
+    }))
+  ];
+
+  return stepCandidates
+    .sort((a, b) => {
+      const tsDelta = new Date(a.ts || 0).getTime() - new Date(b.ts || 0).getTime();
+      if (tsDelta !== 0) return tsDelta;
+      if (a.orderGroup !== b.orderGroup) return a.orderGroup - b.orderGroup;
+      if (a.orderIndex !== b.orderIndex) return a.orderIndex - b.orderIndex;
+      return String(a.rawId).localeCompare(String(b.rawId));
+    })
+    .map((step, index) => ({
+      ...step,
+      seq: index + 1
+    }));
 }
 
 function slugify(value, fallback = 'item') {
@@ -968,40 +1027,11 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
   const seek = seekResp?.item || null;
   const inspect = seek?.liveInspect || null;
   const fallbackRunDetail = fallbackBundle?.runDetail || null;
-  const fallbackMedia = fallbackBundle?.media || [];
-  const fallbackVideos = fallbackMedia.filter((artifact) => artifact.mediaKind === 'video');
-  const fallbackImages = fallbackMedia.filter((artifact) => artifact.mediaKind === 'image');
   const fallbackTests = fallbackRunDetail?.tests || [];
   const fallbackSpecs = fallbackRunDetail?.specs || [];
-  const fallbackArtifacts = fallbackRunDetail?.artifacts || [];
+  const fallbackSteps = buildFallbackReplaySteps(fallbackRunDetail);
   const fallbackFailures = fallbackTests.filter((test) => String(test.status || '').toLowerCase() === 'failed');
   const fallbackFlaky = fallbackTests.filter((test) => String(test.status || '').toLowerCase() === 'flaky');
-  const fallbackTimeline = fallbackRunDetail ? [
-    ...fallbackSpecs.map((spec) => ({
-      ts: spec.finished_at || spec.started_at || spec.created_at,
-      status: spec.status || 'unknown',
-      title: spec.spec_path || spec.id || 'spec',
-      file: spec.spec_path || 'n/a',
-      error: spec.error_message || ''
-    })),
-    ...fallbackTests.map((test) => ({
-      ts: test.created_at || test.finished_at || test.started_at,
-      status: test.status || 'unknown',
-      title: test.test_title || test.test_case_id || test.id || 'test',
-      file: test.file_path || 'n/a',
-      error: test.error_message || test.stacktrace || ''
-    })),
-    ...fallbackArtifacts.map((artifact) => ({
-      ts: artifact.created_at,
-      status: getArtifactMediaKind(artifact) || artifact.type || 'artifact',
-      title: artifact.type || artifact.id || 'artifact',
-      file: artifact.content_type || 'application/octet-stream',
-      error: 'artifact registered'
-    }))
-  ]
-    .filter((entry) => entry.ts)
-    .sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
-    .slice(0, 60) : [];
   const alignmentPct = metrics ? `${Math.round((metrics.commandToDomAlignment || 0) * 100)}%` : 'n/a';
   const targetPct = metrics ? `${Math.round((metrics.targetStability || 0) * 100)}%` : 'n/a';
   const seqContinuityText = metrics
@@ -1021,6 +1051,18 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
   const activeEventSeq = activeEvent ? Number(activeEvent.seq) : null;
   const prevEvent = activeEventIndex > 0 ? events[activeEventIndex - 1] : null;
   const nextEvent = activeEventIndex >= 0 && activeEventIndex < events.length - 1 ? events[activeEventIndex + 1] : null;
+  let activeFallbackStepIndex = -1;
+  if (!streams.length && fallbackSteps.length) {
+    if (hasRequestedEventSeq) {
+      activeFallbackStepIndex = fallbackSteps.findIndex((step) => Number(step.seq) === requestedEventSeq);
+    }
+    if (activeFallbackStepIndex === -1) activeFallbackStepIndex = fallbackSteps.length - 1;
+  }
+  const activeFallbackStep = activeFallbackStepIndex >= 0 ? fallbackSteps[activeFallbackStepIndex] : null;
+  const prevFallbackStep = activeFallbackStepIndex > 0 ? fallbackSteps[activeFallbackStepIndex - 1] : null;
+  const nextFallbackStep = activeFallbackStepIndex >= 0 && activeFallbackStepIndex < fallbackSteps.length - 1
+    ? fallbackSteps[activeFallbackStepIndex + 1]
+    : null;
 
   const baseReplayPath = `/app/runs/${encodeURIComponent(String(runId))}/replay-v2`;
   const buildReplayHref = ({ streamId = selectedStreamId, seq = seekSeq, eventSeq: nextEventSeq = activeEventSeq } = {}) => {
@@ -1088,58 +1130,55 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
       ${!streams.length && fallbackRunDetail ? `<section class="panel">
         <div class="panel-header">
           <div>
-            <h2>Cypress-Style Replay (artifact-backed)</h2>
-            <p>No persisted replay streams were found for this run. Using run artifacts, specs, and tests for browser triage instead.</p>
+            <h2>Cypress-Style Step Replay (fallback)</h2>
+            <p>No persisted replay streams were found for this run. Using run detail specs, tests, and artifacts to synthesize a step timeline instead.</p>
           </div>
           <a class="button button-secondary" href="/app/runs/${escapeHtml(String(runId))}">Back to run</a>
         </div>
         <div class="metrics-grid">
-          ${summaryCard('Videos', String(fallbackVideos.length), fallbackVideos.some((artifact) => !artifact.signedUrl) ? 'Some videos unavailable' : 'Signed video playback ready')}
-          ${summaryCard('Screenshots', String(fallbackImages.length), fallbackImages.some((artifact) => !artifact.signedUrl) ? 'Some screenshots unavailable' : 'Signed image preview ready')}
+          ${summaryCard('Steps', String(fallbackSteps.length), fallbackSteps.length ? `Active step ${activeFallbackStep?.seq || fallbackSteps.length}` : 'No synthetic steps')}
           ${summaryCard('Tests', String(fallbackTests.length), `${fallbackSpecs.length} specs recorded`)}
-          ${summaryCard('Failures', String(fallbackFailures.length), `${fallbackFlaky.length} flaky`)}
+          ${summaryCard('Failures', String(fallbackFailures.length), `${fallbackFailures.length ? 'Needs triage' : 'No failed tests'}`)}
+          ${summaryCard('Flaky', String(fallbackFlaky.length), fallbackFlaky.length ? 'Retry signal present' : 'No flaky tests')}
         </div>
-        ${fallbackVideos.length ? `<div style="display:grid; gap:1rem; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); margin-top:1rem;">
-          ${fallbackVideos.map((artifact) => artifact.signedUrl
-            ? `<article class="summary-card" style="align-items:stretch;">
-              <span class="summary-label">${escapeHtml(artifact.type || 'video')}</span>
-              <strong>${escapeHtml(artifact.fileLabel || artifact.id)}</strong>
-              <video controls preload="metadata" src="${escapeHtml(artifact.signedUrl)}" style="width:100%; border-radius:14px; background:#0f172a; margin-top:0.75rem;"></video>
-              <small>${escapeHtml(formatBytes(artifact.byte_size))} · ${escapeHtml(formatDate(artifact.created_at))}</small>
-              <small><a class="text-link" href="/app/artifacts/${encodeURIComponent(String(artifact.id))}">Artifact details</a></small>
-            </article>`
-            : `<article class="summary-card"><span class="summary-label">${escapeHtml(artifact.type || 'video')}</span><strong>${escapeHtml(artifact.fileLabel || artifact.id)}</strong><small>Signed download unavailable. <a class="text-link" href="/app/artifacts/${encodeURIComponent(String(artifact.id))}">Open artifact details</a>.</small></article>`).join('')}
-        </div>` : '<div class="empty-state"><h3>No videos</h3><p>No video artifacts were registered for this run.</p></div>'}
-        ${fallbackImages.length ? `<div style="margin-top:1.25rem;">
-          <h3 style="margin:0 0 0.75rem;">Screenshots</h3>
-          <div style="display:grid; gap:0.75rem; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));">
-            ${fallbackImages.map((artifact) => artifact.signedUrl
-              ? `<a href="${escapeHtml(artifact.signedUrl)}" target="_blank" rel="noreferrer" style="display:block; text-decoration:none; color:inherit;">
-                <article class="summary-card" style="align-items:stretch;">
-                  <img src="${escapeHtml(artifact.signedUrl)}" alt="${escapeHtml(artifact.fileLabel || artifact.type || 'screenshot')}" style="width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:12px; background:#dbe4ea;" />
-                  <strong style="margin-top:0.75rem;">${escapeHtml(artifact.fileLabel || artifact.id)}</strong>
-                  <small>${escapeHtml(formatDate(artifact.created_at))}</small>
-                  <small><span class="text-link">Open full image</span></small>
-                </article>
-              </a>`
-              : `<article class="summary-card"><span class="summary-label">${escapeHtml(artifact.type || 'screenshot')}</span><strong>${escapeHtml(artifact.fileLabel || artifact.id)}</strong><small>Signed download unavailable. <a class="text-link" href="/app/artifacts/${encodeURIComponent(String(artifact.id))}">Open artifact details</a>.</small></article>`).join('')}
-          </div>
-        </div>` : '<div class="empty-state"><h3>No screenshots</h3><p>No screenshot artifacts were registered for this run.</p></div>'}
+        ${fallbackSteps.length ? `<div class="row-actions" style="margin-top:1rem;">
+          ${prevFallbackStep ? `<a class="button button-secondary" href="${escapeHtml(buildReplayHref({ eventSeq: prevFallbackStep.seq }))}">← Prev step</a>` : '<button class="button button-secondary" type="button" disabled>← Prev step</button>'}
+          ${nextFallbackStep ? `<a class="button button-secondary" href="${escapeHtml(buildReplayHref({ eventSeq: nextFallbackStep.seq }))}">Next step →</a>` : '<button class="button button-secondary" type="button" disabled>Next step →</button>'}
+          <form method="GET" action="${baseReplayPath}" class="inline-form">
+            <label style="display:flex; flex-direction:column; gap:4px;">Step Seq
+              <input name="eventSeq" type="number" min="1" max="${escapeHtml(String(fallbackSteps.length))}" value="${escapeHtml(String(activeFallbackStep?.seq || fallbackSteps.length))}" />
+            </label>
+            <button class="button" type="submit">Jump</button>
+          </form>
+        </div>
+        <div class="table-wrap" style="margin-top:1rem;"><table>
+          <thead><tr><th>Field</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td>Seq</td><td><code>${escapeHtml(activeFallbackStep?.seq || 'n/a')}</code></td></tr>
+            <tr><td>Kind</td><td>${activeFallbackStep ? badge(activeFallbackStep.kind, 'neutral') : 'n/a'}</td></tr>
+            <tr><td>Status</td><td>${activeFallbackStep ? badge(activeFallbackStep.status, formatFallbackStepTone(activeFallbackStep.status, activeFallbackStep.kind)) : 'n/a'}</td></tr>
+            <tr><td>Title</td><td>${escapeHtml(activeFallbackStep?.title || 'n/a')}</td></tr>
+            <tr><td>File</td><td>${escapeHtml(activeFallbackStep?.file || 'n/a')}</td></tr>
+            <tr><td>Error</td><td>${escapeHtml(activeFallbackStep?.error || 'n/a')}</td></tr>
+            <tr><td>Detail</td><td>${escapeHtml(activeFallbackStep?.detail || 'n/a')}</td></tr>
+          </tbody>
+        </table></div>
         <div style="margin-top:1.25rem;">
-          <h3 style="margin:0 0 0.75rem;">Test timeline</h3>
-          ${fallbackTimeline.length ? `<div class="table-wrap"><table>
-            <thead><tr><th>Time</th><th>Status</th><th>Title</th><th>File</th><th>Error snippet</th></tr></thead>
+          <h3 style="margin:0 0 0.75rem;">Step timeline</h3>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Seq</th><th>Kind</th><th>Status</th><th>Title</th><th>File</th><th>Error snippet</th></tr></thead>
             <tbody>
-              ${fallbackTimeline.map((entry) => `<tr>
-                <td>${escapeHtml(formatDate(entry.ts))}</td>
-                <td>${badge(entry.status, formatRunState(entry.status))}</td>
-                <td>${escapeHtml(entry.title)}</td>
-                <td>${escapeHtml(entry.file)}</td>
-                <td>${escapeHtml(summarizeErrorSnippet(entry.error))}</td>
+              ${fallbackSteps.map((step) => `<tr${activeFallbackStep && Number(step.seq) === Number(activeFallbackStep.seq) ? ' style="outline: 2px solid rgba(28, 76, 99, 0.35); outline-offset: -2px; background: rgba(28, 76, 99, 0.06);"' : ''}>
+                <td><a class="text-link" href="${escapeHtml(buildReplayHref({ eventSeq: step.seq }))}">${escapeHtml(step.seq)}</a></td>
+                <td>${badge(step.kind, 'neutral')}</td>
+                <td>${badge(step.status, formatFallbackStepTone(step.status, step.kind))}</td>
+                <td>${escapeHtml(step.title)}</td>
+                <td>${escapeHtml(step.file)}</td>
+                <td>${escapeHtml(summarizeErrorSnippet(step.error, step.detail))}</td>
               </tr>`).join('')}
             </tbody>
-          </table></div>` : '<div class="empty-state"><h3>No test timeline</h3><p>Run detail did not include specs, tests, or artifacts to build the fallback timeline.</p></div>'}
-        </div>
+          </table></div>
+        </div>` : '<div class="empty-state"><h3>No synthetic steps</h3><p>Run detail did not include specs, tests, or artifacts to build the Cypress-style fallback timeline.</p></div>'}
       </section>` : ''}
       <section class="panel">
         <div class="panel-header">
@@ -1975,31 +2014,7 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
     }
   } else {
     const runDetail = await apiFetch(`/v1/runs/${request.params.id}`, { token: shell.session.token });
-    const mediaArtifacts = (runDetail.artifacts || [])
-      .map((artifact) => ({ ...artifact, mediaKind: getArtifactMediaKind(artifact) }))
-      .filter((artifact) => artifact.mediaKind)
-      .slice(0, 12);
-
-    const media = await Promise.all(mediaArtifacts.map(async (artifact) => {
-      try {
-        const detail = await apiFetch(`/v1/artifacts/${artifact.id}/sign-download`, { token: shell.session.token });
-        return {
-          ...artifact,
-          fileLabel: artifact.path || artifact.file_path || artifact.type || artifact.id,
-          signedUrl: sanitizeMediaUrl(detail?.download?.url || ''),
-          downloadExpiresAt: detail?.download?.expiresAt || ''
-        };
-      } catch {
-        return {
-          ...artifact,
-          fileLabel: artifact.path || artifact.file_path || artifact.type || artifact.id,
-          signedUrl: '',
-          downloadExpiresAt: ''
-        };
-      }
-    }));
-
-    fallbackBundle = { runDetail, media };
+    fallbackBundle = { runDetail };
   }
 
   return reply.type('text/html').send(renderReplayV2Page(
