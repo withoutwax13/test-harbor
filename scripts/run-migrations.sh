@@ -6,3 +6,4 @@ psql "${DATABASE_URL}" -f infra/db/migrations/003_ingest_idempotency.sql
 psql "${DATABASE_URL}" -f infra/db/migrations/004_webhook_deliveries.sql
 psql "${DATABASE_URL}" -f infra/db/migrations/005_batches_11_18.sql
 psql "${DATABASE_URL}" -f infra/db/migrations/006_batches_19_26.sql
+psql "${DATABASE_URL}" -f infra/db/migrations/008_replay_v2_storage.sql
