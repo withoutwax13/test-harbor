@@ -2024,17 +2024,26 @@ app.get('/v1/runs/:id/replay-v2/metrics', { preHandler: workspaceGuard({ role: '
      where run_id = $1 and stream_id = $2`,
     [request.params.id, streamId]
   );
+
+  const { rows: seqRows } = await query(
+    `select min(seq) as min_seq, max(seq) as max_seq, count(*) as row_count
+     from replay_v2_events
+     where run_id = $1 and stream_id = $2`,
+    [request.params.id, streamId]
+  );
   const stream = rows[0];
   if (!stream) return reply.code(404).send({ error: 'not_found' });
 
   const actionable = Number(stream.actionable_command_count || 0);
   const alignment = actionable > 0 ? Number(stream.aligned_command_count || 0) / actionable : 1;
   const targetStability = actionable > 0 ? Number(stream.target_resolved_count || 0) / actionable : 1;
-  const firstSeq = Number(stream.first_seq || 0);
-  const lastSeq = Number(stream.last_seq || 0);
-  const eventCount = Number(stream.event_count || 0);
-  const expectedSpan = eventCount > 0 && firstSeq > 0 && lastSeq >= firstSeq ? (lastSeq - firstSeq + 1) : eventCount;
-  const gapCount = Math.max(0, expectedSpan - eventCount);
+
+  const seqRow = seqRows?.[0] || {};
+  const minSeq = seqRow.min_seq !== null ? Number(seqRow.min_seq) : null;
+  const maxSeq = seqRow.max_seq !== null ? Number(seqRow.max_seq) : null;
+  const rowCount = Number(seqRow.row_count || 0);
+  const spanCount = minSeq === null || maxSeq === null ? 0 : (maxSeq - minSeq + 1);
+  const gapCount = Math.max(0, spanCount - rowCount);
 
   return {
     item: {

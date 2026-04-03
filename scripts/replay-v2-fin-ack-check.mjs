@@ -94,12 +94,17 @@ const ackSeen = ackCandidates.length > 0;
 
 function findCorrelatedPair(fins, acks) {
   for (const fin of fins) {
+    if (!fin.finId) {
+      continue;
+    }
+
     for (const ack of acks) {
-      if (!fin.finId || !ack.finId || fin.finId === ack.finId) {
+      if (ack.finId && fin.finId === ack.finId) {
         return { fin, ack, matched: true };
       }
     }
   }
+
   return { fin: fins[0] || null, ack: acks[0] || null, matched: false };
 }
 
@@ -108,7 +113,14 @@ const finInfo = correlation.fin;
 const ackInfo = correlation.ack;
 const finId = finInfo?.finId || null;
 const ackFinId = ackInfo?.finId || null;
-const finAckMatch = Boolean(finSeen && ackSeen && correlation.matched);
+const finAckMatch = Boolean(
+  finSeen
+  && ackSeen
+  && correlation.matched
+  && correlation.fin?.finId
+  && correlation.ack?.finId
+  && correlation.fin.finId === correlation.ack.finId
+);
 
 const result = {
   ok: Boolean(finSeen && ackSeen && finAckMatch),
