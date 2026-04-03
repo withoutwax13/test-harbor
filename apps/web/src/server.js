@@ -930,7 +930,7 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
   });
 }
 
-function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStreamId, metricsResp, targetsResp, seekResp, seekSeq, selectionMeta = {}) {
+function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStreamId, metricsResp, targetsResp, seekResp, seekSeq, selectionMeta = {}, eventSeq = '') {
   const streams = streamsResp.items || [];
   const events = eventsResp.items || [];
   const pageInfo = eventsResp.pageInfo || { total: events.length, limit: events.length };
@@ -948,6 +948,35 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
     ? (metrics.seqContinuity?.zeroGaps ? 'zero gaps' : `${metrics.seqContinuity?.gapCount || 0} gaps`)
     : 'n/a';
 
+  const requestedEventSeq = Number.parseInt(String(eventSeq || '').trim(), 10);
+  const hasRequestedEventSeq = Number.isFinite(requestedEventSeq) && requestedEventSeq > 0;
+  let activeEventIndex = -1;
+  if (events.length) {
+    if (hasRequestedEventSeq) {
+      activeEventIndex = events.findIndex((event) => Number(event.seq) === requestedEventSeq);
+    }
+    if (activeEventIndex === -1) activeEventIndex = events.length - 1;
+  }
+  const activeEvent = activeEventIndex >= 0 ? events[activeEventIndex] : null;
+  const activeEventSeq = activeEvent ? Number(activeEvent.seq) : null;
+  const prevEvent = activeEventIndex > 0 ? events[activeEventIndex - 1] : null;
+  const nextEvent = activeEventIndex >= 0 && activeEventIndex < events.length - 1 ? events[activeEventIndex + 1] : null;
+
+  const baseReplayPath = `/app/runs/${encodeURIComponent(String(runId))}/replay-v2`;
+  const buildReplayHref = ({ streamId = selectedStreamId, seq = seekSeq, eventSeq: nextEventSeq = activeEventSeq } = {}) => {
+    const params = new URLSearchParams();
+    if (streamId) params.set('streamId', String(streamId));
+    if (seq) params.set('seq', String(seq));
+    if (nextEventSeq !== null && nextEventSeq !== undefined && String(nextEventSeq).trim() !== '') {
+      params.set('eventSeq', String(nextEventSeq));
+    }
+    const query = params.toString();
+    return query ? `${baseReplayPath}?${query}` : baseReplayPath;
+  };
+
+  const prevHref = prevEvent ? buildReplayHref({ eventSeq: prevEvent.seq }) : '';
+  const nextHref = nextEvent ? buildReplayHref({ eventSeq: nextEvent.seq }) : '';
+
   return renderLayout({
     title: `Replay V2 ${String(runId).slice(0, 8)}`,
     shell,
@@ -963,6 +992,7 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
           ${summaryCard('Events shown', String(events.length), `${pageInfo.total || 0} matching rows`)}
           ${summaryCard('Selection', selectedStreamId || 'none', selectedStream ? `Seq ${selectedStream.first_seq || 'n/a'}-${selectedStream.last_seq || 'n/a'}` : 'Select a stream')}
           ${summaryCard('Requested', requestedStreamId || 'none', requestedStreamId ? (requestedStreamFound ? 'Matched stream' : 'Not found, fallback applied') : 'No streamId query')}
+          ${summaryCard('Active Event', activeEvent ? String(activeEvent.seq) : 'none', activeEvent ? `${activeEvent.kind} @ ${formatDate(activeEvent.ts)}` : 'Pick a stream with events')}
           ${summaryCard('Seek', seekSeq || 'n/a', inspect?.targetId ? `Inspect ${inspect.targetId}` : 'Nearest checkpoint resolution')}
         </div>
       </section>
@@ -981,6 +1011,7 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
               ${streams.map((stream) => `<option value="${escapeHtml(stream.stream_id)}"${stream.stream_id === selectedStreamId ? ' selected' : ''}>${escapeHtml(stream.stream_id)}</option>`).join('')}
             </select>
           </label>
+          ${seekSeq ? `<input type="hidden" name="seq" value="${escapeHtml(seekSeq)}" />` : ''}
           <button class="button" type="submit">Open stream</button>
         </form><div class="metrics-grid">
           ${streams.map((stream) => `<article class="summary-card">
@@ -993,6 +1024,43 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
             <small>Updated ${escapeHtml(formatDate(stream.updated_at))}</small>
           </article>`).join('')}
         </div>` : '<div class="empty-state"><h3>No replay streams</h3><p>This run has no persisted Replay V2 stream rows yet.</p></div>'}
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Stream Player</h2>
+            <p>Step through the selected stream event-by-event and inspect the active frame payload.</p>
+          </div>
+          ${activeEvent ? badge(`Seq ${activeEvent.seq}`, 'neutral') : ''}
+        </div>
+        ${!selectedStream ? '<div class="empty-state"><h3>No stream selected</h3><p>Select a replay stream first.</p></div>' : !events.length ? '<div class="empty-state"><h3>No replay events</h3><p>This stream has no events to step through yet.</p></div>' : `<div class="metrics-grid"> 
+          ${summaryCard('Position', `${activeEventIndex + 1}/${events.length}`, `Total ${pageInfo.total || events.length} matching rows`)}
+          ${summaryCard('Event Kind', activeEvent?.kind || 'n/a', activeEvent?.lifecycle_event || 'No lifecycle marker')}
+          ${summaryCard('Target', activeEvent?.target_id || 'n/a', activeEvent?.selector_version ? `Selector v${activeEvent.selector_version}` : 'No selector version')}
+          ${summaryCard('Monotonic', activeEvent ? `${activeEvent.monotonic_ms} ms` : 'n/a', activeEvent?.command_id ? `Command ${activeEvent.command_id}` : 'No command id')}
+        </div>
+        <div class="row-actions" style="margin-top:1rem;">
+          ${prevEvent ? `<a class="button button-secondary" href="${escapeHtml(prevHref)}">← Prev</a>` : '<button class="button button-secondary" type="button" disabled>← Prev</button>'}
+          ${nextEvent ? `<a class="button button-secondary" href="${escapeHtml(nextHref)}">Next →</a>` : '<button class="button button-secondary" type="button" disabled>Next →</button>'}
+          <form method="GET" action="${baseReplayPath}" class="inline-form">
+            <input type="hidden" name="streamId" value="${escapeHtml(selectedStreamId)}" />
+            ${seekSeq ? `<input type="hidden" name="seq" value="${escapeHtml(seekSeq)}" />` : ''}
+            <label style="display:flex; flex-direction:column; gap:4px;">Event Seq
+              <input name="eventSeq" type="number" min="${escapeHtml(String(events[0]?.seq || 1))}" max="${escapeHtml(String(events[events.length - 1]?.seq || 1))}" value="${escapeHtml(String(activeEventSeq || events[events.length - 1]?.seq || ''))}" />
+            </label>
+            <button class="button" type="submit">Go</button>
+          </form>
+        </div>
+        <div class="table-wrap" style="margin-top:1rem;"><table>
+          <thead><tr><th>Field</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td>Seq</td><td><code>${escapeHtml(activeEvent?.seq || 'n/a')}</code></td></tr>
+            <tr><td>Kind</td><td><code>${escapeHtml(activeEvent?.kind || 'n/a')}</code></td></tr>
+            <tr><td>Timestamp</td><td>${escapeHtml(formatDate(activeEvent?.ts || ''))}</td></tr>
+            <tr><td>Target</td><td>${activeEvent?.target_id ? `<code>${escapeHtml(activeEvent.target_id)}</code>` : 'n/a'}</td></tr>
+            <tr><td>Payload</td><td>${formatJsonInline(activeEvent?.payload_json || activeEvent?.data_json)}</td></tr>
+          </tbody>
+        </table></div>`}
       </section>
       <section class="panel">
         <div class="panel-header">
@@ -1018,6 +1086,7 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
           </div>
           ${selectedStream ? `<form method="GET" action="/app/runs/${encodeURIComponent(String(runId))}/replay-v2" style="display:flex; gap:0.75rem; align-items:end;">
             <input type="hidden" name="streamId" value="${escapeHtml(selectedStreamId)}" />
+            ${activeEventSeq ? `<input type="hidden" name="eventSeq" value="${escapeHtml(String(activeEventSeq))}" />` : ''}
             <label>Seq<input name="seq" type="number" min="1" value="${escapeHtml(String(seekSeq || selectedStream.last_seq || 1))}" /></label>
             <button class="button" type="submit">Seek</button>
           </form>` : ''}
@@ -1049,8 +1118,12 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
         ${!selectedStream ? '<div class="empty-state"><h3>No stream selected</h3><p>Select a replay stream to inspect ordered events.</p></div>' : events.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Seq</th><th>Kind</th><th>Timestamp</th><th>Monotonic</th><th>Command</th><th>Target</th><th>Payload</th><th>Chunk</th></tr></thead>
           <tbody>
-            ${events.map((event) => `<tr${inspect?.targetId && event.target_id === inspect.targetId ? ' style="background: rgba(245, 158, 11, 0.12);"' : ''}>
-              <td>${escapeHtml(event.seq)}</td>
+            ${events.map((event) => {
+              const rowStyles = [];
+              if (inspect?.targetId && event.target_id === inspect.targetId) rowStyles.push('background: rgba(245, 158, 11, 0.12);');
+              if (activeEvent && Number(event.seq) === Number(activeEvent.seq)) rowStyles.push('outline: 2px solid rgba(28, 76, 99, 0.35); outline-offset: -2px;');
+              return `<tr${rowStyles.length ? ` style="${rowStyles.join(' ')}"` : ''}>
+              <td><a class="text-link" href="${escapeHtml(buildReplayHref({ eventSeq: event.seq }))}">${escapeHtml(event.seq)}</a></td>
               <td><code>${escapeHtml(event.kind)}</code></td>
               <td>${escapeHtml(formatDate(event.ts))}</td>
               <td>${escapeHtml(`${event.monotonic_ms} ms`)}</td>
@@ -1058,7 +1131,8 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
               <td>${event.target_id ? `<div><code>${escapeHtml(event.target_id)}</code><br/><small>v${escapeHtml(event.selector_version || '1')} · ${escapeHtml(event.lifecycle_event || 'active')}</small></div>` : 'n/a'}</td>
               <td>${formatJsonInline(event.payload_json || event.data_json)}</td>
               <td>${event.chunk_id ? `<div><code>${escapeHtml(String(event.chunk_id).slice(0, 8))}</code><br/><small>index ${escapeHtml(event.chunk_index ?? 'n/a')} · final ${event.final ? 'yes' : 'no'}</small></div>` : 'n/a'}</td>
-            </tr>`).join('')}
+            </tr>`;
+            }).join('')}
           </tbody>
         </table></div>` : '<div class="empty-state"><h3>No replay events</h3><p>The selected stream has no persisted events in the requested range.</p></div>'}
       </section>
@@ -1761,6 +1835,7 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
   let targetsResp = { items: [] };
   let seekResp = { item: null };
   const seekSeq = String(request.query?.seq || '').trim();
+  const eventSeq = String(request.query?.eventSeq || '').trim();
   if (selectedStreamId) {
     try {
       eventsResp = await apiFetch(`/v1/runs/${request.params.id}/replay-v2/events?${new URLSearchParams({
@@ -1793,7 +1868,8 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
     targetsResp,
     seekResp,
     seekSeq,
-    selectionMeta
+    selectionMeta,
+    eventSeq
   ));
 });
 
