@@ -73,6 +73,12 @@ If you want a full smoke validation immediately after activation, run:
 npm run smoke:all
 ```
 
+Or run a full clean reset + activation + smoke in one command:
+
+```bash
+npm run activate:local:clean
+```
+
 ## Cypress config UX (projectId-first)
 
 Use the reporter helper with **only** projectId in your Cypress config.

@@ -3,7 +3,9 @@ import crypto from 'node:crypto';
 const apiBase = process.env.API_BASE_URL || 'http://localhost:4000';
 const ingestBase = process.env.INGEST_BASE_URL || 'http://localhost:4010';
 const apiAuthToken = process.env.API_AUTH_TOKEN || '';
-const ingestAuthToken = process.env.INGEST_AUTH_TOKEN || '';
+const ingestAuthTokenEnv = process.env.INGEST_AUTH_TOKEN || '';
+const autoIngestTokenLabel = process.env.SMOKE_INGEST_TOKEN_LABEL || 'smoke-all-auto';
+const autoIngestTokenTtlDays = Number(process.env.SMOKE_INGEST_TOKEN_TTL_DAYS || 1);
 
 async function jsonFetch(url, init, authToken = '') {
   const res = await fetch(url, {
@@ -52,7 +54,39 @@ async function seed() {
   return { workspaceId: ws.item.id, projectId: project.item.id };
 }
 
-async function sendIngest(type, payload) {
+async function issueProjectIngestToken(projectId) {
+  const issued = await jsonFetch(`${apiBase}/v1/projects/${projectId}/ingest-tokens`, {
+    method: 'POST',
+    body: JSON.stringify({
+      label: autoIngestTokenLabel,
+      ttlDays: autoIngestTokenTtlDays
+    })
+  }, apiAuthToken);
+
+  if (!issued?.token) {
+    throw new Error('project_ingest_token_missing_in_response');
+  }
+
+  return issued.token;
+}
+
+async function resolveIngestAuth(projectId) {
+  if (ingestAuthTokenEnv) {
+    return { token: ingestAuthTokenEnv, source: 'env' };
+  }
+
+  try {
+    const token = await issueProjectIngestToken(projectId);
+    return { token, source: 'auto_minted_project_token' };
+  } catch (error) {
+    throw new Error(
+      `failed_to_issue_project_ingest_token: ${error.message}. ` +
+      'Set INGEST_AUTH_TOKEN explicitly or provide API auth context for token minting.'
+    );
+  }
+}
+
+async function sendIngest(type, payload, ingestAuthToken) {
   return jsonFetch(`${ingestBase}/v1/ingest/events`, {
     method: 'POST',
     body: JSON.stringify({
@@ -63,14 +97,14 @@ async function sendIngest(type, payload) {
   }, ingestAuthToken);
 }
 
-async function runSmoke(workspaceId, projectId) {
+async function runSmoke(workspaceId, projectId, ingestAuthToken) {
   const runId = crypto.randomUUID();
   const specRunId = crypto.randomUUID();
   const testResultId = crypto.randomUUID();
   const artifactId = crypto.randomUUID();
 
-  await sendIngest('run.started', { runId, workspaceId, projectId, branch: 'main', commitSha: 'smoke123', ciProvider: 'local' });
-  await sendIngest('spec.started', { specRunId, runId, specPath: 'cypress/e2e/smoke.cy.ts' });
+  await sendIngest('run.started', { runId, workspaceId, projectId, branch: 'main', commitSha: 'smoke123', ciProvider: 'local' }, ingestAuthToken);
+  await sendIngest('spec.started', { specRunId, runId, specPath: 'cypress/e2e/smoke.cy.ts' }, ingestAuthToken);
   await sendIngest('test.result', {
     testResultId,
     specRunId,
@@ -82,7 +116,7 @@ async function runSmoke(workspaceId, projectId) {
     status: 'passed',
     attemptNo: 1,
     durationMs: 412
-  });
+  }, ingestAuthToken);
   await sendIngest('artifact.registered', {
     artifactId,
     runId,
@@ -92,9 +126,9 @@ async function runSmoke(workspaceId, projectId) {
     storageKey: `artifacts/${runId}/video.mp4`,
     contentType: 'video/mp4',
     byteSize: 12345
-  });
-  await sendIngest('spec.finished', { specRunId, status: 'passed', durationMs: 900, attempts: 1 });
-  await sendIngest('run.finished', { runId, status: 'passed', totalSpecs: 1, totalTests: 1, passCount: 1, failCount: 0, flakyCount: 0 });
+  }, ingestAuthToken);
+  await sendIngest('spec.finished', { specRunId, status: 'passed', durationMs: 900, attempts: 1 }, ingestAuthToken);
+  await sendIngest('run.finished', { runId, status: 'passed', totalSpecs: 1, totalTests: 1, passCount: 1, failCount: 0, flakyCount: 0 }, ingestAuthToken);
 
   return runId;
 }
@@ -112,7 +146,8 @@ async function verify(workspaceId, projectId, runId) {
 }
 
 const { workspaceId, projectId } = await seed();
-const runId = await runSmoke(workspaceId, projectId);
+const ingestAuth = await resolveIngestAuth(projectId);
+const runId = await runSmoke(workspaceId, projectId, ingestAuth.token);
 const summary = await verify(workspaceId, projectId, runId);
 
 console.log(JSON.stringify({
@@ -122,5 +157,6 @@ console.log(JSON.stringify({
   workspaceId,
   projectId,
   runId,
+  ingestAuth: { source: ingestAuth.source },
   summary
 }, null, 2));
