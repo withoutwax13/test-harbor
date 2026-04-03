@@ -10,6 +10,7 @@ const INGEST_PUBLIC_BASE_URL = (process.env.INGEST_PUBLIC_BASE_URL || 'http://lo
 const SESSION_COOKIE = 'th_session';
 const WORKSPACE_COOKIE = 'th_workspace';
 const PROJECT_COOKIE = 'th_project';
+const NEW_PROJECT_TOKEN_COOKIE = 'th_new_project_token';
 const stylesPath = path.join(process.cwd(), 'apps/web/src/styles.css');
 const scriptPath = path.join(process.cwd(), 'apps/web/src/web.js');
 const stylesCss = await fs.readFile(stylesPath, 'utf8');
@@ -31,6 +32,65 @@ function formatDate(value) {
     timeStyle: 'short',
     timeZone: 'UTC'
   }).format(new Date(value));
+}
+
+function toDatetimeLocalInput(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const yyyy = String(date.getUTCFullYear());
+  const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(date.getUTCDate()).padStart(2, '0');
+  const hh = String(date.getUTCHours()).padStart(2, '0');
+  const min = String(date.getUTCMinutes()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
+}
+
+function toIsoFromDatetimeLocal(value) {
+  if (!value) return '';
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+}
+
+function parseJsonCookie(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function formatTokenState(token) {
+  return String(token?.state || 'unknown').toLowerCase();
+}
+
+function formatDeliveryState(status) {
+  if (status === 'delivered') return 'success';
+  if (status === 'dead') return 'danger';
+  return 'warning';
+}
+
+function formatRunState(status) {
+  if (status === 'passed') return 'success';
+  if (status === 'failed') return 'danger';
+  if (status === 'flaky') return 'warning';
+  return 'neutral';
+}
+
+function formatDeltaFromNow(value) {
+  if (!value) return 'n/a';
+  const ts = new Date(value).getTime();
+  if (Number.isNaN(ts)) return 'n/a';
+  const deltaMs = ts - Date.now();
+  const absMs = Math.abs(deltaMs);
+  const minutes = Math.round(absMs / 60000);
+  if (minutes < 1) return deltaMs >= 0 ? 'in <1m' : '<1m ago';
+  if (minutes < 60) return deltaMs >= 0 ? `in ${minutes}m` : `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return deltaMs >= 0 ? `in ${hours}h` : `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return deltaMs >= 0 ? `in ${days}d` : `${days}d ago`;
 }
 
 function formatDuration(ms) {
@@ -130,6 +190,7 @@ function getRequestContext(request) {
     token: cookies[SESSION_COOKIE] || '',
     selectedWorkspaceId: request.query?.workspaceId || cookies[WORKSPACE_COOKIE] || '',
     selectedProjectId: request.query?.projectId || cookies[PROJECT_COOKIE] || '',
+    newProjectToken: parseJsonCookie(cookies[NEW_PROJECT_TOKEN_COOKIE]),
     notice,
     error
   };
@@ -160,7 +221,7 @@ async function getSession(request) {
 async function requireSession(request, reply) {
   const { ctx, session, expired } = await getSession(request);
   if (!session) {
-    if (expired) setCookies(reply, [clearCookie(SESSION_COOKIE), clearCookie(WORKSPACE_COOKIE), clearCookie(PROJECT_COOKIE)]);
+    if (expired) setCookies(reply, [clearCookie(SESSION_COOKIE), clearCookie(WORKSPACE_COOKIE), clearCookie(PROJECT_COOKIE), clearCookie(NEW_PROJECT_TOKEN_COOKIE)]);
     return reply.redirect(`/login${expired ? '?error=Session expired. Sign in again.' : ''}`);
   }
   return { ctx, session };
@@ -207,6 +268,7 @@ function renderLayout({ title, shell, currentPath, content }) {
   const navItems = [
     ['/app/onboarding', 'Onboarding'],
     ['/app/connect', 'Connect'],
+    ['/app/team', 'Team'],
     ['/app/runs', 'Runs'],
     ['/app/admin', 'Admin'],
     ['/session', 'Session']
@@ -290,44 +352,163 @@ function renderSelectContextCard(shell, returnTo) {
   </section>`;
 }
 
-function renderSnippet(workspace, project) {
-  if (!workspace || !project) {
-    return '<div class="empty-state"><h3>Connect snippet unavailable</h3><p>Create or select a workspace and project first.</p></div>';
-  }
-
-  const runId = '${RUN_ID:-$(uuidgen)}';
-  const snippet = `export INGEST_BASE_URL="${INGEST_PUBLIC_BASE_URL}"
-export INGEST_AUTH_TOKEN="replace-me"
-
-curl -X POST "$INGEST_BASE_URL/v1/ingest/events" \\
-  -H "Authorization: Bearer $INGEST_AUTH_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "type":"run.started",
-    "idempotencyKey":"'"${crypto.randomUUID()}"'",
-    "payload":{
-      "runId":"${runId}",
-      "workspaceId":"${workspace.id}",
-      "projectId":"${project.id}",
-      "branch":"main",
-      "commitSha":"local-smoke",
-      "ciProvider":"manual"
+function renderProgressSteps(shell, tokens, latestRun) {
+  const hasContext = Boolean(shell.selectedWorkspace && shell.selectedProject);
+  const hasToken = tokens.some((token) => formatTokenState(token) === 'active');
+  const hasVerificationRun = Boolean(latestRun);
+  const steps = [
+    {
+      title: 'Workspace + project',
+      done: hasContext,
+      detail: hasContext
+        ? `${shell.selectedWorkspace.name} / ${shell.selectedProject.name}`
+        : 'Select or create both in onboarding'
+    },
+    {
+      title: 'Project ingest token',
+      done: hasToken,
+      detail: hasToken ? `${tokens.filter((token) => formatTokenState(token) === 'active').length} active token(s)` : 'Mint a token before wiring Cypress'
+    },
+    {
+      title: 'Cypress reporter config',
+      done: hasContext && hasToken,
+      detail: hasContext && hasToken ? 'Use the snippet below in CI or local Cypress' : 'Needs context and an active token'
+    },
+    {
+      title: 'Verify run ingestion',
+      done: hasVerificationRun,
+      detail: hasVerificationRun
+        ? `${latestRun.status} · ${formatDate(latestRun.created_at)}`
+        : 'Trigger run.started and confirm it appears in /app/runs'
     }
-  }'`;
+  ];
 
   return `<section class="panel">
     <div class="panel-header">
       <div>
-        <h2>Connect snippet</h2>
-        <p>Drop this into a shell or CI job to send the first event for ${escapeHtml(project.name)}.</p>
+        <h2>Progress</h2>
+        <p>Move left-to-right: context → token → Cypress wiring → verify run.</p>
+      </div>
+    </div>
+    <ol class="step-list">
+      ${steps.map((step, index) => `<li class="${step.done ? 'done' : 'todo'}">
+        <span class="step-index">${index + 1}</span>
+        <div>
+          <strong>${escapeHtml(step.title)}</strong>
+          <small>${escapeHtml(step.detail)}</small>
+        </div>
+        ${badge(step.done ? 'done' : 'todo', step.done ? 'success' : 'warning')}
+      </li>`).join('')}
+    </ol>
+  </section>`;
+}
+
+function renderTokenPanel(shell, tokens, { returnTo = '/app/connect', newTokenBundle = null } = {}) {
+  if (!shell.selectedWorkspace || !shell.selectedProject) {
+    return '<section class="panel"><div class="empty-state"><h3>Project token controls unavailable</h3><p>Select a workspace and project first.</p></div></section>';
+  }
+
+  const items = tokens || [];
+  const activeCount = items.filter((item) => formatTokenState(item) === 'active').length;
+  const oneTimeToken = newTokenBundle?.token || '';
+
+  return `<section class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Project ingest tokens</h2>
+        <p>Tokens are project-scoped. The raw token is shown once at creation, then only hash + hint are retained.</p>
+      </div>
+      ${badge(`${activeCount} active`, activeCount ? 'success' : 'warning')}
+    </div>
+    ${oneTimeToken ? `<div class="flash flash-notice">
+      <strong>Token created — copy it now.</strong>
+      <pre class="code-block">${escapeHtml(oneTimeToken)}</pre>
+      <p>This value is not recoverable after this page render.</p>
+    </div>` : ''}
+    <div class="grid two-up compact-grid">
+      <form class="stack" data-json-form action="/app/project-ingest-tokens" method="post">
+        <input type="hidden" name="projectId" value="${escapeHtml(shell.selectedProject.id)}" />
+        <input type="hidden" name="returnTo" value="${escapeHtml(returnTo)}" />
+        <label>Label<input name="label" placeholder="cypress-ci" required /></label>
+        <label>TTL (days)<input name="ttlDays" type="number" min="1" max="365" value="90" /></label>
+        <button class="button" type="submit">Create token</button>
+      </form>
+      <div class="stack">
+        <small>Recommended naming: environment + runner + purpose (for example <code>gha-e2e-main</code>).</small>
+        <small>Rotate by creating a new token, updating CI secret, then revoking the old token.</small>
+        <small>Token hint is the last characters only; the plaintext token is never returned again.</small>
+      </div>
+    </div>
+    ${items.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Label</th><th>Hint</th><th>State</th><th>Expires</th><th>Last used</th><th>Created</th><th></th></tr></thead>
+      <tbody>
+        ${items.map((item) => {
+          const state = formatTokenState(item);
+          const tone = state === 'active' ? 'success' : state === 'expired' ? 'warning' : 'danger';
+          return `<tr>
+            <td>${escapeHtml(item.label || 'token')}</td>
+            <td><code>…${escapeHtml(item.token_hint || '')}</code></td>
+            <td>${badge(state, tone)}</td>
+            <td>${escapeHtml(formatDate(item.expires_at))}</td>
+            <td>${escapeHtml(formatDate(item.last_used_at))}</td>
+            <td>${escapeHtml(formatDate(item.created_at))}</td>
+            <td>
+              ${state === 'revoked' ? '' : `<form data-json-form data-confirm="Revoke token ${escapeHtml(item.label || item.id)}?" action="/app/project-ingest-tokens/${item.id}/revoke" method="post">
+                <input type="hidden" name="projectId" value="${escapeHtml(shell.selectedProject.id)}" />
+                <input type="hidden" name="returnTo" value="${escapeHtml(returnTo)}" />
+                <button class="button button-danger" type="submit">Revoke</button>
+              </form>`}
+            </td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table></div>` : '<div class="empty-state"><h3>No project tokens</h3><p>Create the first token to unlock the Cypress snippet.</p></div>'}
+  </section>`;
+}
+
+function renderSnippet(shell, { tokens = [], latestRun = null, newTokenBundle = null } = {}) {
+  const workspace = shell.selectedWorkspace;
+  const project = shell.selectedProject;
+  if (!workspace || !project) {
+    return '<div class="empty-state"><h3>Connect snippet unavailable</h3><p>Create or select a workspace and project first.</p></div>';
+  }
+
+  const activeToken = newTokenBundle?.token || (tokens.find((item) => formatTokenState(item) === 'active') ? '\${TESTHARBOR_INGEST_TOKEN}' : '<create-a-project-token>');
+  const snippet = `# Only one ID is required in cypress.config: projectId
+# Token and ingest URL come from env (CI secret + URL)
+export TESTHARBOR_INGEST_URL="${INGEST_PUBLIC_BASE_URL}/v1/ingest/events"
+export TESTHARBOR_INGEST_TOKEN="${activeToken}"
+
+import { defineConfig } from 'cypress';
+import { withTestHarborCypress } from '@testharbor/cypress-reporter';
+
+export default defineConfig({
+  e2e: {
+    setupNodeEvents: withTestHarborCypress({
+      projectId: '${project.id}'
+    })
+  }
+});`;
+
+  return `<section class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Cypress-first connect snippet</h2>
+        <p>ProjectId-centric setup: paste one projectId in config, keep token/base URL in env.</p>
       </div>
       ${badge(project.provider || 'custom', 'neutral')}
     </div>
     <pre class="code-block">${escapeHtml(snippet)}</pre>
+    <div class="stack">
+      <small><strong>Minimal setupNodeEvents:</strong> no manual run/spec/test wiring required.</small>
+      <small><strong>Workspace ID optional:</strong> ingest resolves workspace from projectId when omitted.</small>
+      <small><strong>Artifacts:</strong> helper auto-registers screenshots/videos from Cypress results.</small>
+    </div>
+    ${latestRun ? `<p>Latest run: <a class="text-link" href="/app/runs/${latestRun.id}">${escapeHtml(latestRun.id.slice(0, 8))}</a> · ${badge(latestRun.status, formatRunState(latestRun.status))}</p>` : '<p>No run yet. Run Cypress once to verify end-to-end auth and ingest.</p>'}
   </section>`;
 }
 
-function renderOnboardingPage(shell) {
+function renderOnboardingPage(shell, { tokens = [], latestRun = null, newTokenBundle = null } = {}) {
   const workspaceStats = `${shell.workspaces.length} workspace${shell.workspaces.length === 1 ? '' : 's'}`;
   const projectStats = `${shell.projects.length} project${shell.projects.length === 1 ? '' : 's'}`;
 
@@ -339,7 +520,7 @@ function renderOnboardingPage(shell) {
         <div>
           <p class="eyebrow">Batches 19-26 productized</p>
           <h2>Stand up the real user flow</h2>
-          <p>Authenticate, create a workspace, choose a project, then copy the connect snippet. This page intentionally keeps the first-run path linear.</p>
+          <p>Authenticate, create a workspace, choose a project, mint a project token, wire Cypress, and verify the first run.</p>
         </div>
         <div class="hero-metrics">
           ${summaryCard('Workspaces', workspaceStats, 'Available to this user')}
@@ -347,6 +528,7 @@ function renderOnboardingPage(shell) {
           ${summaryCard('Session', shell.session?.user?.email || 'No session', 'Local auth token')}
         </div>
       </section>
+      ${renderProgressSteps(shell, tokens, latestRun)}
       <div class="grid two-up">
         ${renderSelectContextCard(shell, '/app/onboarding')}
         <section class="panel">
@@ -385,8 +567,9 @@ function renderOnboardingPage(shell) {
             <button class="button" type="submit" ${shell.selectedWorkspace ? '' : 'disabled'}>Create project</button>
           </form>
         </section>
-        ${renderSnippet(shell.selectedWorkspace, shell.selectedProject)}
-      </div>`
+        ${renderTokenPanel(shell, tokens, { returnTo: '/app/onboarding', newTokenBundle })}
+      </div>
+      ${renderSnippet(shell, { tokens, latestRun, newTokenBundle, returnTo: '/app/onboarding' })}`
   });
 }
 
@@ -402,7 +585,7 @@ function renderStatusCard(label, status, detail, tone) {
   </article>`;
 }
 
-function renderConnectPage(shell, status, latestRun) {
+function renderConnectPage(shell, status, latestRun, { tokens = [], newTokenBundle = null } = {}) {
   const apiStatus = status.services.api;
   const ingestStatus = status.services.ingest;
   const workerStatus = status.services.worker;
@@ -415,13 +598,14 @@ function renderConnectPage(shell, status, latestRun) {
         <div>
           <p class="eyebrow">Operator checks</p>
           <h2>Verify that TestHarbor is ready to receive events</h2>
-          <p>Service health is aggregated server-side so this page works for local Docker and for remote deployments behind private service URLs.</p>
+          <p>Service health is aggregated server-side so this page works for local Docker and remote deployments behind private URLs.</p>
         </div>
         <div class="hero-metrics">
           ${summaryCard('Recent runs', String(status.metrics.recentRuns24h), 'Last 24 hours')}
           ${summaryCard('Latest run', latestRun?.status || 'none', latestRun ? formatDate(latestRun.created_at) : 'No run in selected project')}
         </div>
       </section>
+      ${renderProgressSteps(shell, tokens, latestRun)}
       <div class="grid three-up">
         ${renderStatusCard('API', apiStatus.state, `DB: ${apiStatus.db}, storage: ${apiStatus.storageBackend}`, apiStatus.ok ? 'success' : 'danger')}
         ${renderStatusCard('Ingest', ingestStatus.state, `Base URL: ${ingestStatus.baseUrl}`, ingestStatus.ok ? 'success' : 'danger')}
@@ -446,7 +630,7 @@ function renderConnectPage(shell, status, latestRun) {
           <div class="panel-header">
             <div>
               <h2>Send test event</h2>
-              <p>Queue a notification test against the selected workspace to validate API to worker to webhook delivery.</p>
+              <p>Queue a notification test against the selected workspace to validate API → worker → webhook delivery.</p>
             </div>
           </div>
           <form class="stack" data-json-form action="/app/connect/test-event" method="post">
@@ -463,13 +647,32 @@ function renderConnectPage(shell, status, latestRun) {
           </form>
         </section>
       </div>
-      ${renderSnippet(shell.selectedWorkspace, shell.selectedProject)}`
+      <div class="grid two-up">
+        ${renderTokenPanel(shell, tokens, { returnTo: '/app/connect', newTokenBundle })}
+        ${renderSnippet(shell, { tokens, latestRun, newTokenBundle, returnTo: '/app/connect' })}
+      </div>`
   });
 }
 
 function renderRunsPage(shell, runsResp) {
   const items = runsResp.items || [];
   const pageInfo = runsResp.pageInfo || { page: 1, totalPages: 1, total: items.length };
+  const failureFirst = items.filter((run) => (Number(run.fail_count || 0) + Number(run.flaky_count || 0)) > 0 || ['failed', 'flaky'].includes(run.status));
+  const failureOnly = shell.ctx.focus === 'failure';
+  const visibleItems = failureOnly ? failureFirst : items;
+
+  const paramsBase = new URLSearchParams({
+    workspaceId: shell.selectedWorkspace?.id || '',
+    projectId: shell.selectedProject?.id || '',
+    ...(shell.ctx.branch ? { branch: shell.ctx.branch } : {}),
+    ...(shell.ctx.runStatus ? { status: shell.ctx.runStatus } : {}),
+    ...(shell.ctx.from ? { from: shell.ctx.from } : {}),
+    ...(shell.ctx.to ? { to: shell.ctx.to } : {}),
+    ...(shell.ctx.page ? { page: shell.ctx.page } : {})
+  });
+  const allHref = `/app/runs?${new URLSearchParams([...paramsBase, ['focus', 'all']]).toString()}`;
+  const failureHref = `/app/runs?${new URLSearchParams([...paramsBase, ['focus', 'failure']]).toString()}`;
+
   return renderLayout({
     title: 'Runs',
     shell,
@@ -478,24 +681,51 @@ function renderRunsPage(shell, runsResp) {
         <div class="panel-header">
           <div>
             <h2>Run list</h2>
-            <p>Filterable browser list for the selected project.</p>
+            <p>Filterable browser list for the selected project, including date windows for triage slices.</p>
           </div>
-          ${badge(`${pageInfo.total} total`, 'neutral')}
+          <div class="topbar-badges">
+            ${badge(`${pageInfo.total} total`, 'neutral')}
+            ${badge(`${failureFirst.length} failing/flaky`, failureFirst.length ? 'warning' : 'neutral')}
+          </div>
         </div>
-        <form class="filters" method="get" action="/app/runs">
+        <form class="filters filters-wide" method="get" action="/app/runs">
           <input type="hidden" name="workspaceId" value="${escapeHtml(shell.selectedWorkspace?.id || '')}" />
           <input type="hidden" name="projectId" value="${escapeHtml(shell.selectedProject?.id || '')}" />
           <label>Branch<input name="branch" value="${escapeHtml(shell.ctx.branch || '')}" /></label>
           <label>Status<input name="status" value="${escapeHtml(shell.ctx.runStatus || '')}" /></label>
+          <label>From (UTC)<input type="datetime-local" name="from" value="${escapeHtml(shell.ctx.from || '')}" /></label>
+          <label>To (UTC)<input type="datetime-local" name="to" value="${escapeHtml(shell.ctx.to || '')}" /></label>
           <label>Page<input type="number" min="1" name="page" value="${escapeHtml(shell.ctx.page || '1')}" /></label>
+          <label>Focus
+            <select name="focus">
+              <option value="all" ${failureOnly ? '' : 'selected'}>all runs</option>
+              <option value="failure" ${failureOnly ? 'selected' : ''}>failing/flaky only</option>
+            </select>
+          </label>
           <button class="button button-secondary" type="submit">Apply filters</button>
         </form>
-        ${items.length ? `<div class="table-wrap"><table>
+        ${failureFirst.length ? `<div class="failure-quick-view">
+          <div class="panel-header">
+            <h3>Failure-first quick view</h3>
+            <div class="topbar-badges">
+              <a class="button button-secondary" href="${escapeHtml(allHref)}">All runs</a>
+              <a class="button button-secondary" href="${escapeHtml(failureHref)}">Failures only</a>
+            </div>
+          </div>
+          <div class="metrics-grid">
+            ${failureFirst.slice(0, 6).map((run) => `<article class="metric">
+              <span>${escapeHtml(formatDate(run.created_at))}</span>
+              <strong><a class="text-link" href="/app/runs/${run.id}">${escapeHtml((run.branch || 'n/a').slice(0, 32))}</a></strong>
+              <small>${badge(run.status, formatRunState(run.status))} · ${escapeHtml(`${run.fail_count || 0} failed / ${run.flaky_count || 0} flaky`)}</small>
+            </article>`).join('')}
+          </div>
+        </div>` : ''}
+        ${visibleItems.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Created</th><th>Status</th><th>Branch</th><th>Commit</th><th>Specs</th><th>Tests</th><th></th></tr></thead>
           <tbody>
-            ${items.map((run) => `<tr>
+            ${visibleItems.map((run) => `<tr>
               <td>${escapeHtml(formatDate(run.created_at))}</td>
-              <td>${badge(run.status, run.status === 'passed' ? 'success' : run.status === 'failed' ? 'danger' : 'warning')}</td>
+              <td>${badge(run.status, formatRunState(run.status))}</td>
               <td>${escapeHtml(run.branch || 'n/a')}</td>
               <td><code>${escapeHtml((run.commit_sha || 'n/a').slice(0, 12))}</code></td>
               <td>${escapeHtml(`${run.total_specs}/${run.pass_count + run.fail_count + run.flaky_count || run.total_specs}`)}</td>
@@ -503,7 +733,7 @@ function renderRunsPage(shell, runsResp) {
               <td><a class="text-link" href="/app/runs/${run.id}">Open</a></td>
             </tr>`).join('')}
           </tbody>
-        </table></div>` : '<div class="empty-state"><h3>No runs yet</h3><p>Use the onboarding snippet or the connect page to start sending ingest events.</p></div>'}
+        </table></div>` : '<div class="empty-state"><h3>No runs for this filter</h3><p>Try clearing filters or switching focus back to all runs.</p></div>'}
       </section>`
   });
 }
@@ -514,6 +744,73 @@ function renderRunDetailPage(shell, runDetail) {
   const specs = runDetail.specs || [];
   const tests = runDetail.tests || [];
   const artifacts = runDetail.artifacts || [];
+  const failingOrFlaky = tests.filter((test) => ['failed', 'flaky'].includes(test.status));
+
+  const flakyByTest = Object.values(
+    tests.reduce((acc, test) => {
+      const key = test.test_case_id || test.test_title || test.id;
+      if (!acc[key]) {
+        acc[key] = {
+          test_case_id: test.test_case_id,
+          test_title: test.test_title,
+          file_path: test.file_path,
+          flakyCount: 0,
+          failedCount: 0
+        };
+      }
+      if (test.status === 'flaky') acc[key].flakyCount += 1;
+      if (test.status === 'failed') acc[key].failedCount += 1;
+      return acc;
+    }, {})
+  )
+    .filter((row) => row.flakyCount > 0)
+    .sort((a, b) => b.flakyCount - a.flakyCount)
+    .slice(0, 10);
+
+  const mediaArtifacts = artifacts.filter((artifact) => {
+    const type = String(artifact.type || '').toLowerCase();
+    const contentType = String(artifact.content_type || '').toLowerCase();
+    return type.includes('screenshot')
+      || type.includes('video')
+      || contentType.startsWith('image/')
+      || contentType.startsWith('video/');
+  });
+  const screenshotCount = mediaArtifacts.filter((artifact) => {
+    const type = String(artifact.type || '').toLowerCase();
+    const contentType = String(artifact.content_type || '').toLowerCase();
+    return type.includes('screenshot') || contentType.startsWith('image/');
+  }).length;
+  const videoCount = mediaArtifacts.filter((artifact) => {
+    const type = String(artifact.type || '').toLowerCase();
+    const contentType = String(artifact.content_type || '').toLowerCase();
+    return type.includes('video') || contentType.startsWith('video/');
+  }).length;
+
+  const errorLogs = failingOrFlaky.filter((test) => test.error_message || test.stacktrace);
+
+  const timeline = [
+    ...specs.map((spec) => ({
+      ts: spec.finished_at || spec.started_at || spec.created_at,
+      kind: `spec.${spec.status || 'event'}`,
+      title: spec.spec_path,
+      detail: `attempts=${spec.attempts || 0}, duration=${formatDuration(spec.duration_ms)}`
+    })),
+    ...tests.map((test) => ({
+      ts: test.created_at,
+      kind: `test.${test.status || 'event'}`,
+      title: test.test_title || test.test_case_id || test.id,
+      detail: `${test.file_path || 'n/a'}${test.error_message ? ` • ${test.error_message.slice(0, 140)}` : ''}`
+    })),
+    ...artifacts.map((artifact) => ({
+      ts: artifact.created_at,
+      kind: 'artifact.registered',
+      title: artifact.type,
+      detail: `${artifact.content_type || 'application/octet-stream'} • ${formatBytes(artifact.byte_size)}`
+    }))
+  ]
+    .filter((entry) => entry.ts)
+    .sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
+    .slice(0, 120);
 
   return renderLayout({
     title: `Run ${item.id.slice(0, 8)}`,
@@ -537,23 +834,58 @@ function renderRunDetailPage(shell, runDetail) {
           <div class="table-wrap"><table>
             <thead><tr><th>Spec</th><th>Status</th><th>Attempts</th><th>Duration</th></tr></thead>
             <tbody>
-              ${specs.map((spec) => `<tr><td>${escapeHtml(spec.spec_path)}</td><td>${badge(spec.status, spec.status === 'passed' ? 'success' : spec.status === 'failed' ? 'danger' : 'warning')}</td><td>${escapeHtml(spec.attempts || 0)}</td><td>${escapeHtml(formatDuration(spec.duration_ms))}</td></tr>`).join('')}
+              ${specs.map((spec) => `<tr><td>${escapeHtml(spec.spec_path)}</td><td>${badge(spec.status, formatRunState(spec.status))}</td><td>${escapeHtml(spec.attempts || 0)}</td><td>${escapeHtml(formatDuration(spec.duration_ms))}</td></tr>`).join('')}
             </tbody>
           </table></div>
         </section>
         <section class="panel">
-          <div class="panel-header"><div><h2>Failures & flakes</h2><p>Fast browser triage for the most important failing tests.</p></div></div>
-          ${tests.filter((test) => ['failed', 'flaky'].includes(test.status)).length
-            ? tests.filter((test) => ['failed', 'flaky'].includes(test.status)).slice(0, 20).map((test) => `<article class="failure-row">
-                <div><strong>${escapeHtml(test.test_title)}</strong><p>${escapeHtml(test.file_path)}</p></div>
-                <div>${badge(test.status, test.status === 'failed' ? 'danger' : 'warning')}</div>
-                <pre>${escapeHtml(test.error_message || 'No error message')}</pre>
-              </article>`).join('')
-            : '<div class="empty-state"><h3>No failing tests</h3><p>This run has no failed or flaky test results.</p></div>'}
+          <div class="panel-header"><div><h2>Flaky hotspots</h2><p>Top test cases with flaky outcomes in this run.</p></div></div>
+          ${flakyByTest.length ? `<div class="table-wrap"><table>
+            <thead><tr><th>Test</th><th>Spec path</th><th>Flaky</th><th>Failed</th><th></th></tr></thead>
+            <tbody>
+              ${flakyByTest.map((row) => `<tr>
+                <td>${escapeHtml(row.test_title || row.test_case_id || 'test')}</td>
+                <td>${escapeHtml(row.file_path || 'n/a')}</td>
+                <td>${escapeHtml(row.flakyCount)}</td>
+                <td>${escapeHtml(row.failedCount)}</td>
+                <td>${row.test_case_id ? `<a class="text-link" href="/app/tests/${row.test_case_id}/history?workspaceId=${encodeURIComponent(shell.selectedWorkspace?.id || '')}">History</a>` : ''}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table></div>` : '<div class="empty-state"><h3>No flaky hotspots</h3><p>No flaky test outcomes recorded for this run.</p></div>'}
         </section>
       </div>
       <section class="panel">
-        <div class="panel-header"><div><h2>Artifacts</h2><p>Every artifact registered against this run. Open individual entries for signed access metadata.</p></div></div>
+        <div class="panel-header"><div><h2>Failures & flakes</h2><p>Fast browser triage for failing tests. Includes captured error message and stacktrace preview.</p></div></div>
+        ${failingOrFlaky.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Status</th><th>Test</th><th>Spec</th><th>Error</th><th></th></tr></thead>
+          <tbody>
+            ${failingOrFlaky.slice(0, 80).map((test) => `<tr>
+              <td>${badge(test.status, test.status === 'failed' ? 'danger' : 'warning')}</td>
+              <td>${escapeHtml(test.test_title || 'test')}</td>
+              <td>${escapeHtml(test.file_path || 'n/a')}</td>
+              <td>${escapeHtml((test.error_message || 'No error message').slice(0, 180))}${test.stacktrace ? '<br/><small>stacktrace captured</small>' : ''}</td>
+              <td>${test.test_case_id ? `<a class="text-link" href="/app/tests/${test.test_case_id}/history?workspaceId=${encodeURIComponent(shell.selectedWorkspace?.id || '')}">History</a>` : ''}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>` : '<div class="empty-state"><h3>No failing tests</h3><p>This run has no failed or flaky test results.</p></div>'}
+      </section>
+      <section class="panel">
+        <div class="panel-header"><div><h2>Error logs</h2><p>Expanded error message + stacktrace for quick debugging without leaving the run page.</p></div></div>
+        ${errorLogs.length ? `<div class="stack">${errorLogs.slice(0, 30).map((test, idx) => `<details>
+          <summary>${escapeHtml(test.test_title || `test-${idx + 1}`)} · ${escapeHtml(test.file_path || 'n/a')}</summary>
+          <pre class="code-block">${escapeHtml(`${test.error_message || 'No error message'}
+
+${test.stacktrace || 'No stacktrace captured'}`)}</pre>
+        </details>`).join('')}</div>` : '<div class="empty-state"><h3>No error logs captured</h3><p>When test.result events include error_message/stacktrace, details appear here.</p></div>'}
+      </section>
+      <section class="panel">
+        <div class="panel-header"><div><h2>Artifacts</h2><p>Screenshots/videos are listed here once registered by the Cypress reporter helper.</p></div></div>
+        <div class="metrics-grid">
+          ${metric('Media artifacts', mediaArtifacts.length)}
+          ${metric('Screenshots', screenshotCount)}
+          ${metric('Videos', videoCount)}
+          ${metric('All artifacts', artifacts.length)}
+        </div>
         ${artifacts.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Type</th><th>Content type</th><th>Size</th><th>Created</th><th></th></tr></thead>
           <tbody>
@@ -566,6 +898,20 @@ function renderRunDetailPage(shell, runDetail) {
             </tr>`).join('')}
           </tbody>
         </table></div>` : '<div class="empty-state"><h3>No artifacts</h3><p>Artifacts appear here after the ingest client registers them.</p></div>'}
+      </section>
+      <section class="panel">
+        <div class="panel-header"><div><h2>Replay-like timeline</h2><p>Event timeline for run/spec/test/artifact activity (lightweight Cypress Cloud-style trace).</p></div></div>
+        ${timeline.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Time</th><th>Event</th><th>Title</th><th>Detail</th></tr></thead>
+          <tbody>
+            ${timeline.map((entry) => `<tr>
+              <td>${escapeHtml(formatDate(entry.ts))}</td>
+              <td><code>${escapeHtml(entry.kind)}</code></td>
+              <td>${escapeHtml(entry.title || 'n/a')}</td>
+              <td>${escapeHtml(entry.detail || '')}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>` : '<div class="empty-state"><h3>No timeline events</h3><p>Events appear after run/spec/test/artifact ingest activity.</p></div>'}
       </section>`
   });
 }
@@ -595,10 +941,140 @@ function renderArtifactPage(shell, detail) {
   });
 }
 
+function renderTeamPage(shell, membersResp) {
+  const members = membersResp.items || [];
+  return renderLayout({
+    title: 'Team',
+    shell,
+    currentPath: '/app/team',
+    content: `<div class="grid two-up">
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Add or invite member</h2>
+            <p>Add by email, assign role, and keep ownership explicitly managed.</p>
+          </div>
+        </div>
+        <form class="stack" data-json-form action="/app/team/add" method="post">
+          <input type="hidden" name="workspaceId" value="${escapeHtml(shell.selectedWorkspace?.id || '')}" />
+          <label>Email<input type="email" name="email" placeholder="qa@example.com" required /></label>
+          <label>Name<input name="name" placeholder="QA Engineer" /></label>
+          <label>Role
+            <select name="role">
+              ${['viewer', 'member', 'admin', 'owner'].map((role) => `<option value="${role}">${role}</option>`).join('')}
+            </select>
+          </label>
+          <button class="button" type="submit" ${shell.selectedWorkspace ? '' : 'disabled'}>Upsert member</button>
+        </form>
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Role guide</h2>
+            <p>Viewer read-only, member can submit project changes, admin manages members/tokens/webhooks, owner can delete workspace.</p>
+          </div>
+        </div>
+        <div class="stack">
+          <small>Keep at least one owner in each workspace.</small>
+          <small>Prefer project-level ingest tokens over sharing a global ingest secret.</small>
+          <small>Role updates and removals are audit logged.</small>
+        </div>
+      </section>
+    </div>
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h2>Workspace members</h2>
+          <p>Update roles or remove members in place.</p>
+        </div>
+        ${badge(`${members.length} members`, 'neutral')}
+      </div>
+      ${members.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>User</th><th>Email</th><th>Role</th><th>Added</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${members.map((member) => `<tr>
+            <td>${escapeHtml(member.name || member.user_id)}</td>
+            <td>${escapeHtml(member.email || 'n/a')}</td>
+            <td>${badge(member.role, member.role === 'owner' ? 'success' : member.role === 'admin' ? 'warning' : 'neutral')}</td>
+            <td>${escapeHtml(formatDate(member.created_at))}</td>
+            <td>
+              <div class="row-actions">
+                <form class="inline-form" data-json-form action="/app/team/${member.user_id}/role" method="post">
+                  <input type="hidden" name="workspaceId" value="${escapeHtml(shell.selectedWorkspace?.id || '')}" />
+                  <select name="role">
+                    ${['viewer', 'member', 'admin', 'owner'].map((role) => `<option value="${role}" ${role === member.role ? 'selected' : ''}>${role}</option>`).join('')}
+                  </select>
+                  <button class="button button-secondary" type="submit">Update</button>
+                </form>
+                <form class="inline-form" data-json-form data-confirm="Remove ${escapeHtml(member.email || member.user_id)} from workspace?" action="/app/team/${member.user_id}/remove" method="post">
+                  <input type="hidden" name="workspaceId" value="${escapeHtml(shell.selectedWorkspace?.id || '')}" />
+                  <button class="button button-danger" type="submit">Remove</button>
+                </form>
+              </div>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div>` : '<div class="empty-state"><h3>No members</h3><p>Add teammates to unlock role-scoped collaboration.</p></div>'}
+    </section>`
+  });
+}
+
+function renderTestHistoryPage(shell, testCaseId, historyResp) {
+  const items = historyResp.items || [];
+  const pageInfo = historyResp.pageInfo || { total: items.length };
+  return renderLayout({
+    title: `Test history ${String(testCaseId).slice(0, 8)}`,
+    shell,
+    currentPath: '/app/runs',
+    content: `<section class="panel">
+      <div class="panel-header">
+        <div>
+          <h2>Test history</h2>
+          <p>Historical outcomes for test case <code>${escapeHtml(testCaseId)}</code>.</p>
+        </div>
+        ${badge(`${pageInfo.total} results`, 'neutral')}
+      </div>
+      ${items.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>Created</th><th>Status</th><th>Run</th><th>Spec</th><th>Duration</th><th>Error</th></tr></thead>
+        <tbody>
+          ${items.map((item) => `<tr>
+            <td>${escapeHtml(formatDate(item.created_at))}</td>
+            <td>${badge(item.status, formatRunState(item.status))}</td>
+            <td><a class="text-link" href="/app/runs/${item.run_id}">${escapeHtml(item.run_id.slice(0, 8))}</a></td>
+            <td>${escapeHtml(item.spec_path || 'n/a')}</td>
+            <td>${escapeHtml(formatDuration(item.duration_ms))}</td>
+            <td>${escapeHtml((item.error_message || '').slice(0, 180) || 'n/a')}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div>` : '<div class="empty-state"><h3>No history</h3><p>No test results found for this test case yet.</p></div>'}
+    </section>`
+  });
+}
+
 function renderAdminPage(shell, hooksResp, deliveriesResp, logsResp) {
   const hooks = hooksResp.items || [];
   const deliveries = deliveriesResp.items || [];
   const logs = logsResp.items || [];
+
+  const groupedDeliveries = Object.entries(
+    deliveries.reduce((acc, delivery) => {
+      const key = delivery.event_type || 'unknown';
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(delivery);
+      return acc;
+    }, {})
+  )
+    .map(([eventType, items]) => ({
+      eventType,
+      items: items.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+    }))
+    .sort((a, b) => b.items.length - a.items.length);
+
+  const deliverySummary = {
+    delivered: deliveries.filter((item) => item.status === 'delivered').length,
+    retrying: deliveries.filter((item) => item.status === 'retry_scheduled' || item.status === 'queued' || item.status === 'delivering').length,
+    dead: deliveries.filter((item) => item.status === 'dead').length
+  };
 
   return renderLayout({
     title: 'Admin & Webhooks',
@@ -609,7 +1085,7 @@ function renderAdminPage(shell, hooksResp, deliveriesResp, logsResp) {
           <div class="panel-header">
             <div>
               <h2>Create webhook endpoint</h2>
-              <p>Basic admin surface for notification delivery and smoke validation.</p>
+              <p>Admin surface for notification delivery and smoke validation.</p>
             </div>
           </div>
           <form class="stack" data-json-form action="/app/webhooks" method="post">
@@ -638,40 +1114,60 @@ function renderAdminPage(shell, hooksResp, deliveriesResp, logsResp) {
         </section>
       </div>
       <section class="panel">
-        <div class="panel-header"><div><h2>Webhook endpoints</h2><p>Enable, disable, or remove endpoints without dropping to raw API calls.</p></div></div>
-        ${hooks.length ? hooks.map((hook) => `<article class="hook-card">
-            <div>
-              <strong>${escapeHtml(hook.type)}</strong>
-              <p>${escapeHtml(hook.target_url)}</p>
-              <small>${escapeHtml(formatDate(hook.created_at))}</small>
+        <div class="panel-header"><div><h2>Webhook endpoints</h2><p>Enable/disable endpoints and rotate/clear secrets with confirmation safeguards.</p></div></div>
+        ${hooks.length ? hooks.map((hook) => `<article class="hook-card stack">
+            <div class="hook-row">
+              <div>
+                <strong>${escapeHtml(hook.type)}</strong>
+                <p>${escapeHtml(hook.target_url)}</p>
+                <small>${escapeHtml(formatDate(hook.created_at))}</small>
+              </div>
+              <div>${badge(hook.enabled ? 'enabled' : 'disabled', hook.enabled ? 'success' : 'warning')}</div>
             </div>
-            <div class="hook-actions">
-              ${badge(hook.enabled ? 'enabled' : 'disabled', hook.enabled ? 'success' : 'warning')}
-              <form data-json-form action="/app/webhooks/${hook.id}/update" method="post">
+            <div class="row-actions">
+              <form class="inline-form" data-json-form action="/app/webhooks/${hook.id}/update" method="post">
                 <input type="hidden" name="enabled" value="${hook.enabled ? 'false' : 'true'}" />
                 <button class="button button-secondary" type="submit">${hook.enabled ? 'Disable' : 'Enable'}</button>
               </form>
-              <form data-json-form data-confirm="Delete this webhook endpoint?" action="/app/webhooks/${hook.id}/delete" method="post">
+              <form class="inline-form" data-json-form data-confirm="Rotate webhook secret for ${escapeHtml(hook.target_url)}?" action="/app/webhooks/${hook.id}/secret" method="post">
+                <input name="secret" placeholder="new secret" required />
+                <button class="button button-secondary" type="submit">Rotate secret</button>
+              </form>
+              <form class="inline-form" data-json-form data-confirm="Clear webhook secret for ${escapeHtml(hook.target_url)}? Existing signatures will stop validating." action="/app/webhooks/${hook.id}/secret" method="post">
+                <input type="hidden" name="clear" value="true" />
+                <button class="button button-secondary" type="submit">Clear secret</button>
+              </form>
+              <form class="inline-form" data-json-form data-confirm="Delete this webhook endpoint?" action="/app/webhooks/${hook.id}/delete" method="post">
                 <button class="button button-danger" type="submit">Delete</button>
               </form>
             </div>
           </article>`).join('') : '<div class="empty-state"><h3>No endpoints</h3><p>Create one above to start receiving notification tests.</p></div>'}
       </section>
       <section class="panel">
-        <div class="panel-header"><div><h2>Recent deliveries</h2><p>Browser view over delivery attempts for the selected workspace.</p></div></div>
-        ${deliveries.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Status</th><th>Event</th><th>Attempts</th><th>Target</th><th>Last error</th><th>Updated</th></tr></thead>
-          <tbody>
-            ${deliveries.map((delivery) => `<tr>
-              <td>${badge(delivery.status, delivery.status === 'delivered' ? 'success' : delivery.status === 'dead' ? 'danger' : 'warning')}</td>
-              <td>${escapeHtml(delivery.event_type)}</td>
-              <td>${escapeHtml(`${delivery.attempt_count}/${delivery.max_attempts}`)}</td>
-              <td>${escapeHtml(delivery.target_url)}</td>
-              <td>${escapeHtml(delivery.last_error || 'n/a')}</td>
-              <td>${escapeHtml(formatDate(delivery.updated_at))}</td>
-            </tr>`).join('')}
-          </tbody>
-        </table></div>` : '<div class="empty-state"><h3>No deliveries yet</h3><p>Use the connect page to queue a notification test.</p></div>'}
+        <div class="panel-header">
+          <div><h2>Delivery timeline</h2><p>Grouped by event type with state buckets for faster admin triage.</p></div>
+          <div class="topbar-badges">
+            ${badge(`${deliverySummary.delivered} delivered`, 'success')}
+            ${badge(`${deliverySummary.retrying} retrying`, 'warning')}
+            ${badge(`${deliverySummary.dead} dead`, 'danger')}
+          </div>
+        </div>
+        ${groupedDeliveries.length ? groupedDeliveries.map((group) => `<section class="timeline-group">
+            <h3>${escapeHtml(group.eventType)}</h3>
+            <div class="table-wrap"><table>
+              <thead><tr><th>Status</th><th>Attempts</th><th>Target</th><th>Last error</th><th>Updated</th><th>When</th></tr></thead>
+              <tbody>
+                ${group.items.map((delivery) => `<tr>
+                  <td>${badge(delivery.status, formatDeliveryState(delivery.status))}</td>
+                  <td>${escapeHtml(`${delivery.attempt_count}/${delivery.max_attempts}`)}</td>
+                  <td>${escapeHtml(delivery.target_url)}</td>
+                  <td>${escapeHtml(delivery.last_error || 'n/a')}</td>
+                  <td>${escapeHtml(formatDate(delivery.updated_at))}</td>
+                  <td>${escapeHtml(formatDeltaFromNow(delivery.updated_at))}</td>
+                </tr>`).join('')}
+              </tbody>
+            </table></div>
+          </section>`).join('') : '<div class="empty-state"><h3>No deliveries yet</h3><p>Use the connect page to queue a notification test.</p></div>'}
       </section>`
   });
 }
@@ -740,7 +1236,7 @@ app.post('/login', async (request, reply) => {
     body: { email, name, avatarUrl }
   });
 
-  const cookies = [buildCookie(SESSION_COOKIE, login.token)];
+  const cookies = [buildCookie(SESSION_COOKIE, login.token), clearCookie(NEW_PROJECT_TOKEN_COOKIE)];
   const firstWorkspace = login.memberships?.[0]?.workspace_id || '';
   if (firstWorkspace) cookies.push(buildCookie(WORKSPACE_COOKIE, firstWorkspace));
   return jsonRedirect(reply, '/app/onboarding?notice=Signed in.', cookies);
@@ -749,7 +1245,8 @@ app.post('/login', async (request, reply) => {
 app.post('/logout', async (_request, reply) => jsonRedirect(reply, '/login?notice=Signed out.', [
   clearCookie(SESSION_COOKIE),
   clearCookie(WORKSPACE_COOKIE),
-  clearCookie(PROJECT_COOKIE)
+  clearCookie(PROJECT_COOKIE),
+  clearCookie(NEW_PROJECT_TOKEN_COOKIE)
 ]));
 
 app.get('/session', async (request, reply) => {
@@ -784,15 +1281,39 @@ app.post('/app/context', async (request, reply) => {
   const returnTo = String(body.returnTo || '/app/onboarding');
   const cookies = [];
   if (workspaceId) cookies.push(buildCookie(WORKSPACE_COOKIE, workspaceId));
-  if (projectId) cookies.push(buildCookie(PROJECT_COOKIE, projectId));
-  if (!projectId) cookies.push(clearCookie(PROJECT_COOKIE));
+  if (projectId) {
+    cookies.push(buildCookie(PROJECT_COOKIE, projectId));
+  } else {
+    cookies.push(clearCookie(PROJECT_COOKIE));
+    cookies.push(clearCookie(NEW_PROJECT_TOKEN_COOKIE));
+  }
   return jsonRedirect(reply, `${returnTo}?notice=Context updated.`, cookies);
 });
 
 app.get('/app/onboarding', async (request, reply) => {
   const shell = await loadShellData(request);
   if (!shell.session) return requireSession(request, reply);
-  return reply.type('text/html').send(renderOnboardingPage(shell));
+
+  const [tokensResp, latestRunResp] = await Promise.all([
+    shell.selectedProject
+      ? apiFetch(`/v1/projects/${shell.selectedProject.id}/ingest-tokens?limit=50`, { token: shell.session.token }).catch(() => ({ items: [] }))
+      : Promise.resolve({ items: [] }),
+    shell.selectedProject
+      ? apiFetch(`/v1/projects/${shell.selectedProject.id}/latest-run`, { token: shell.session.token }).catch(() => ({ item: null }))
+      : Promise.resolve({ item: null })
+  ]);
+
+  const html = renderOnboardingPage(shell, {
+    tokens: tokensResp.items || [],
+    latestRun: latestRunResp.item || null,
+    newTokenBundle: shell.ctx.newProjectToken
+  });
+
+  if (shell.ctx.newProjectToken?.token) {
+    setCookies(reply, [clearCookie(NEW_PROJECT_TOKEN_COOKIE)]);
+  }
+
+  return reply.type('text/html').send(html);
 });
 
 app.post('/app/workspaces', async (request, reply) => {
@@ -814,7 +1335,8 @@ app.post('/app/workspaces', async (request, reply) => {
 
   return jsonRedirect(reply, '/app/onboarding?notice=Workspace created.', [
     buildCookie(WORKSPACE_COOKIE, created.item.id),
-    clearCookie(PROJECT_COOKIE)
+    clearCookie(PROJECT_COOKIE),
+    clearCookie(NEW_PROJECT_TOKEN_COOKIE)
   ]);
 });
 
@@ -840,20 +1362,80 @@ app.post('/app/projects', async (request, reply) => {
 
   return jsonRedirect(reply, '/app/onboarding?notice=Project created.', [
     buildCookie(WORKSPACE_COOKIE, workspaceId),
-    buildCookie(PROJECT_COOKIE, created.item.id)
+    buildCookie(PROJECT_COOKIE, created.item.id),
+    clearCookie(NEW_PROJECT_TOKEN_COOKIE)
   ]);
 });
 
+
+
+app.post('/app/project-ingest-tokens', async (request, reply) => {
+  const shell = await loadShellData(request);
+  if (!shell.session) return reply.code(401).send({ ok: false, error: 'unauthorized' });
+  const body = request.body || {};
+  const projectId = String(body.projectId || shell.selectedProject?.id || '');
+  const returnTo = String(body.returnTo || '/app/connect');
+  if (!projectId) return reply.code(400).send({ ok: false, error: 'Select a project first.' });
+
+  const created = await apiFetch(`/v1/projects/${projectId}/ingest-tokens`, {
+    method: 'POST',
+    token: shell.session.token,
+    body: {
+      label: String(body.label || '').trim(),
+      ttlDays: body.ttlDays === undefined || body.ttlDays === null || body.ttlDays === '' ? undefined : Number(body.ttlDays)
+    }
+  });
+
+  const payload = JSON.stringify({
+    token: created.token,
+    item: created.item,
+    createdAt: new Date().toISOString()
+  });
+
+  return jsonRedirect(reply, `${returnTo}?notice=Project token created. Copy it now.`, [
+    buildCookie(NEW_PROJECT_TOKEN_COOKIE, payload, { maxAge: 60 * 5 })
+  ]);
+});
+
+app.post('/app/project-ingest-tokens/:tokenId/revoke', async (request, reply) => {
+  const shell = await loadShellData(request);
+  if (!shell.session) return reply.code(401).send({ ok: false, error: 'unauthorized' });
+  const body = request.body || {};
+  const projectId = String(body.projectId || shell.selectedProject?.id || '');
+  const returnTo = String(body.returnTo || '/app/connect');
+  if (!projectId) return reply.code(400).send({ ok: false, error: 'Select a project first.' });
+
+  await apiFetch(`/v1/projects/${projectId}/ingest-tokens/${request.params.tokenId}/revoke`, {
+    method: 'POST',
+    token: shell.session.token
+  });
+
+  return jsonRedirect(reply, `${returnTo}?notice=Project token revoked.`);
+});
 app.get('/app/connect', async (request, reply) => {
   const shell = await loadShellData(request);
   if (!shell.session) return requireSession(request, reply);
 
-  const status = await apiFetch('/v1/system/status', { token: shell.session.token });
-  const latestRun = shell.selectedProject
-    ? (await apiFetch(`/v1/projects/${shell.selectedProject.id}/latest-run`, { token: shell.session.token }).catch(() => ({ item: null }))).item
-    : null;
+  const [status, latestRunResp, tokensResp] = await Promise.all([
+    apiFetch('/v1/system/status', { token: shell.session.token }),
+    shell.selectedProject
+      ? apiFetch(`/v1/projects/${shell.selectedProject.id}/latest-run`, { token: shell.session.token }).catch(() => ({ item: null }))
+      : Promise.resolve({ item: null }),
+    shell.selectedProject
+      ? apiFetch(`/v1/projects/${shell.selectedProject.id}/ingest-tokens?limit=50`, { token: shell.session.token }).catch(() => ({ items: [] }))
+      : Promise.resolve({ items: [] })
+  ]);
 
-  return reply.type('text/html').send(renderConnectPage(shell, status, latestRun));
+  const html = renderConnectPage(shell, status, latestRunResp.item || null, {
+    tokens: tokensResp.items || [],
+    newTokenBundle: shell.ctx.newProjectToken
+  });
+
+  if (shell.ctx.newProjectToken?.token) {
+    setCookies(reply, [clearCookie(NEW_PROJECT_TOKEN_COOKIE)]);
+  }
+
+  return reply.type('text/html').send(html);
 });
 
 app.post('/app/connect/test-event', async (request, reply) => {
@@ -877,6 +1459,74 @@ app.post('/app/connect/test-event', async (request, reply) => {
   return jsonRedirect(reply, '/app/connect?notice=Queued a notification test event.');
 });
 
+
+
+app.get('/app/team', async (request, reply) => {
+  const shell = await loadShellData(request);
+  if (!shell.session) return requireSession(request, reply);
+  if (!shell.selectedWorkspace) {
+    return reply.redirect('/app/onboarding?error=Select a workspace before opening team.');
+  }
+
+  const membersResp = await apiFetch(`/v1/workspaces/${shell.selectedWorkspace.id}/members`, { token: shell.session.token });
+  return reply.type('text/html').send(renderTeamPage(shell, membersResp));
+});
+
+app.post('/app/team/add', async (request, reply) => {
+  const shell = await loadShellData(request);
+  if (!shell.session) return reply.code(401).send({ ok: false, error: 'unauthorized' });
+
+  const body = request.body || {};
+  const workspaceId = String(body.workspaceId || shell.selectedWorkspace?.id || '');
+  if (!workspaceId) return reply.code(400).send({ ok: false, error: 'Select a workspace first.' });
+
+  await apiFetch(`/v1/workspaces/${workspaceId}/members`, {
+    method: 'POST',
+    token: shell.session.token,
+    body: {
+      email: String(body.email || '').trim(),
+      name: String(body.name || '').trim() || 'Workspace Member',
+      role: String(body.role || 'member')
+    }
+  });
+
+  return jsonRedirect(reply, '/app/team?notice=Member upserted.');
+});
+
+app.post('/app/team/:userId/role', async (request, reply) => {
+  const shell = await loadShellData(request);
+  if (!shell.session) return reply.code(401).send({ ok: false, error: 'unauthorized' });
+
+  const body = request.body || {};
+  const workspaceId = String(body.workspaceId || shell.selectedWorkspace?.id || '');
+  if (!workspaceId) return reply.code(400).send({ ok: false, error: 'Select a workspace first.' });
+
+  await apiFetch(`/v1/workspaces/${workspaceId}/members/${request.params.userId}`, {
+    method: 'PATCH',
+    token: shell.session.token,
+    body: {
+      role: String(body.role || '').trim()
+    }
+  });
+
+  return jsonRedirect(reply, '/app/team?notice=Member role updated.');
+});
+
+app.post('/app/team/:userId/remove', async (request, reply) => {
+  const shell = await loadShellData(request);
+  if (!shell.session) return reply.code(401).send({ ok: false, error: 'unauthorized' });
+
+  const body = request.body || {};
+  const workspaceId = String(body.workspaceId || shell.selectedWorkspace?.id || '');
+  if (!workspaceId) return reply.code(400).send({ ok: false, error: 'Select a workspace first.' });
+
+  await apiFetch(`/v1/workspaces/${workspaceId}/members/${request.params.userId}`, {
+    method: 'DELETE',
+    token: shell.session.token
+  });
+
+  return jsonRedirect(reply, '/app/team?notice=Member removed.');
+});
 app.get('/app/runs', async (request, reply) => {
   const shell = await loadShellData(request);
   if (!shell.session) return requireSession(request, reply);
@@ -884,18 +1534,28 @@ app.get('/app/runs', async (request, reply) => {
     return reply.redirect('/app/onboarding?error=Create or select a workspace and project before opening runs.');
   }
 
+  const fromInput = String(request.query?.from || '');
+  const toInput = String(request.query?.to || '');
+  const fromIso = toIsoFromDatetimeLocal(fromInput) || '';
+  const toIso = toIsoFromDatetimeLocal(toInput) || '';
+
   const params = new URLSearchParams({
     workspaceId: shell.selectedWorkspace.id,
     projectId: shell.selectedProject.id,
     ...(request.query?.branch ? { branch: String(request.query.branch) } : {}),
     ...(request.query?.status ? { status: String(request.query.status) } : {}),
+    ...(fromIso ? { from: fromIso } : {}),
+    ...(toIso ? { to: toIso } : {}),
     page: String(request.query?.page || '1'),
     limit: '20'
   });
   const runsResp = await apiFetch(`/v1/runs?${params.toString()}`, { token: shell.session.token });
   shell.ctx.branch = String(request.query?.branch || '');
   shell.ctx.runStatus = String(request.query?.status || '');
+  shell.ctx.from = fromInput;
+  shell.ctx.to = toInput;
   shell.ctx.page = String(request.query?.page || '1');
+  shell.ctx.focus = String(request.query?.focus || 'all');
   return reply.type('text/html').send(renderRunsPage(shell, runsResp));
 });
 
@@ -906,6 +1566,27 @@ app.get('/app/runs/:id', async (request, reply) => {
   return reply.type('text/html').send(renderRunDetailPage(shell, detail));
 });
 
+
+
+app.get('/app/tests/:id/history', async (request, reply) => {
+  const shell = await loadShellData(request);
+  if (!shell.session) return requireSession(request, reply);
+
+  const workspaceId = String(request.query?.workspaceId || shell.selectedWorkspace?.id || '');
+  if (!workspaceId) {
+    return reply.redirect('/app/runs?error=Select a workspace before opening test history.');
+  }
+
+  const params = new URLSearchParams({
+    workspaceId,
+    page: String(request.query?.page || '1'),
+    limit: String(request.query?.limit || '50'),
+    ...(request.query?.status ? { status: String(request.query.status) } : {})
+  });
+
+  const historyResp = await apiFetch(`/v1/tests/${request.params.id}/history?${params.toString()}`, { token: shell.session.token });
+  return reply.type('text/html').send(renderTestHistoryPage(shell, request.params.id, historyResp));
+});
 app.get('/app/artifacts/:id', async (request, reply) => {
   const shell = await loadShellData(request);
   if (!shell.session) return requireSession(request, reply);
@@ -921,7 +1602,7 @@ app.get('/app/admin', async (request, reply) => {
   const workspaceId = shell.selectedWorkspace.id;
   const [hooksResp, deliveriesResp, logsResp] = await Promise.all([
     apiFetch(`/v1/webhook-endpoints?workspaceId=${encodeURIComponent(workspaceId)}`, { token: shell.session.token }),
-    apiFetch(`/v1/webhook-deliveries?workspaceId=${encodeURIComponent(workspaceId)}&limit=20`, { token: shell.session.token }),
+    apiFetch(`/v1/webhook-deliveries?workspaceId=${encodeURIComponent(workspaceId)}&limit=80`, { token: shell.session.token }),
     apiFetch(`/v1/audit-logs?workspaceId=${encodeURIComponent(workspaceId)}&limit=15`, { token: shell.session.token }).catch(() => ({ items: [] }))
   ]);
 
@@ -960,6 +1641,27 @@ app.post('/app/webhooks/:id/update', async (request, reply) => {
   return jsonRedirect(reply, '/app/admin?notice=Webhook endpoint updated.');
 });
 
+
+
+app.post('/app/webhooks/:id/secret', async (request, reply) => {
+  const shell = await loadShellData(request);
+  if (!shell.session) return reply.code(401).send({ ok: false, error: 'unauthorized' });
+  const body = request.body || {};
+  const clear = body.clear === true || body.clear === 'true';
+  const nextSecret = clear ? null : String(body.secret || '').trim();
+
+  if (!clear && !nextSecret) {
+    return reply.code(400).send({ ok: false, error: 'Secret is required unless clear=true.' });
+  }
+
+  await apiFetch(`/v1/webhook-endpoints/${request.params.id}`, {
+    method: 'PATCH',
+    token: shell.session.token,
+    body: { secret: nextSecret }
+  });
+
+  return jsonRedirect(reply, `/app/admin?notice=${encodeURIComponent(clear ? 'Webhook secret cleared.' : 'Webhook secret rotated.')}`);
+});
 app.post('/app/webhooks/:id/delete', async (request, reply) => {
   const shell = await loadShellData(request);
   if (!shell.session) return reply.code(401).send({ ok: false, error: 'unauthorized' });

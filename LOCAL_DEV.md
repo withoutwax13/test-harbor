@@ -40,15 +40,42 @@ npm run smoke:all
 1. Open `http://localhost:3000/login`.
 2. Sign in with a local name and email.
 3. Use `/app/onboarding` to create or select a workspace and project.
-4. Copy the connect snippet into a shell or CI job.
-5. Use `/app/connect` to inspect API, ingest, and worker health, then queue a test event.
-6. Use `/app/runs` and `/app/runs/:id` for browser triage.
-7. Use `/app/admin` for webhook endpoint and delivery basics.
+4. Mint a **project ingest token** (shown once on creation, then stored as hash+hint only).
+5. Copy the Cypress-first connect snippet and emit `run.started`.
+6. Use `/app/connect` to inspect API, ingest, and worker health, then queue a test event.
+7. Use `/app/team` for member add/update/remove and role management.
+8. Use `/app/runs`, `/app/runs/:id`, and `/app/tests/:id/history` for triage (including date filters).
+9. Use `/app/admin` for webhook endpoint management, secret rotate/clear, and grouped delivery timeline.
 
 Browser smoke:
 
 ```bash
 npm run smoke:web-shell
+```
+
+Parity evidence pack:
+
+```bash
+npm run parity:pack
+```
+
+Project token quick issue:
+
+```bash
+curl -X POST "http://localhost:4000/v1/projects/<projectId>/ingest-tokens" \
+  -H "Authorization: Bearer <api-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"local-cypress","ttlDays":30}'
+```
+
+Use returned token as `TESTHARBOR_INGEST_TOKEN` for ingest/Cypress reporter calls.
+
+Optional shell capture when web is reachable and you have a session token:
+
+```bash
+TH_PARITY_WEB_BASE_URL=http://localhost:3000 \
+TH_AUTH_TOKEN='<session-token-from-/v1/auth/login>' \
+npm run parity:pack
 ```
 
 ## Auth (optional)
@@ -173,3 +200,24 @@ Troubleshooting matrix:
 | `401 unauthorized` in auth lanes | Missing or mismatched `API_AUTH_TOKEN` / `INGEST_AUTH_TOKEN` | Export matching bearer tokens for API and ingest before running auth smokes |
 | `timeout waiting for webhook delivery terminal state` | Worker not running, stale runtime, or retry window too short | Check `docker compose logs --tail=200 api ingest worker`; increase `WEBHOOK_WAIT_TIMEOUT_MS` only after confirming current images |
 | Seeded webhook smoke rows remain after run | Running default-safe mode or org cleanup opt-in is off | Use `WEBHOOK_SEEDED_DATA_MODE=teardown`; add `ALLOW_SMOKE_ORG_CLEANUP=1` plus `WEBHOOK_DELETE_SMOKE_ORG_ON_EXIT=1` only for isolated smoke org cleanup |
+
+## One-command activation
+
+For local developer start-up, use the new one-liner:
+
+```bash
+npm run activate:local
+```
+
+This runs in order:
+1. `docker compose up -d postgres redis minio ingest api worker web`
+2. `npm run db:migrate:container`
+3. `npm run seed:local`
+
+After this, use the app at <http://localhost:3000> and run your cypress smoke with the project token flow.
+
+To run smoke immediately after activation:
+
+```bash
+npm run activate:local && npm run smoke:all
+```

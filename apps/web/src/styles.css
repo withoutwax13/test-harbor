@@ -297,6 +297,97 @@ th, td {
   padding: 18px;
 }
 
+
+
+.step-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.step-list li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.7);
+}
+
+.step-list li.done {
+  border: 1px solid rgba(47, 125, 79, 0.28);
+}
+
+.step-list li.todo {
+  border: 1px dashed rgba(173, 123, 23, 0.35);
+}
+
+.step-index {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  align-items: center;
+  justify-content: center;
+  background: rgba(28, 76, 99, 0.14);
+  font-weight: 700;
+}
+
+.step-list small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.compact-grid {
+  align-items: start;
+}
+
+.filters-wide {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.failure-quick-view {
+  margin-bottom: 16px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.64);
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.inline-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.inline-form input,
+.inline-form select {
+  min-width: 120px;
+}
+
+.hook-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.timeline-group {
+  margin-bottom: 16px;
+}
+
+.timeline-group h3 {
+  margin: 0 0 8px;
+}
 .login-body {
   min-height: 100vh;
   display: grid;

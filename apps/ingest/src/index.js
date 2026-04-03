@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import Fastify from 'fastify';
 import pg from 'pg';
 import { INGEST_EVENT_TYPES, assertReplayV2ChunkPayload, isValidIngestType } from '@testharbor/shared';
@@ -19,11 +20,10 @@ function parseBearerToken(headerValue) {
 }
 
 app.addHook('onRequest', async (request, reply) => {
-  if (!INGEST_AUTH_TOKEN) return;
   if (request.url.startsWith('/healthz')) return;
 
   const token = parseBearerToken(request.headers.authorization);
-  if (token !== INGEST_AUTH_TOKEN) {
+  if (!token) {
     return reply.code(401).send({ error: 'unauthorized' });
   }
 });
@@ -37,7 +37,7 @@ class ValidationError extends Error {
 }
 
 const REQUIRED_FIELDS_BY_TYPE = {
-  [INGEST_EVENT_TYPES.RUN_STARTED]: ['runId', 'workspaceId', 'projectId'],
+  [INGEST_EVENT_TYPES.RUN_STARTED]: ['runId', 'projectId'],
   [INGEST_EVENT_TYPES.RUN_FINISHED]: ['runId', 'status'],
   [INGEST_EVENT_TYPES.SPEC_STARTED]: ['specRunId', 'runId', 'specPath'],
   [INGEST_EVENT_TYPES.SPEC_FINISHED]: ['specRunId', 'status'],
@@ -86,6 +86,106 @@ async function withTransaction(handler) {
   }
 }
 
+
+
+function hashText(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+async function findActiveProjectIngestToken(rawToken) {
+  if (!rawToken) return null;
+  const tokenHash = hashText(rawToken);
+  const { rows } = await query(
+    `select id, workspace_id, project_id, label, token_hint, last_used_at, expires_at, revoked_at
+     from project_ingest_tokens
+     where token_hash = $1
+       and revoked_at is null
+       and (expires_at is null or expires_at > now())
+     order by created_at desc
+     limit 1`,
+    [tokenHash]
+  );
+  return rows[0] || null;
+}
+
+async function markProjectIngestTokenUsed(tokenId) {
+  if (!tokenId) return;
+  await query(
+    `update project_ingest_tokens
+     set last_used_at = now()
+     where id = $1`,
+    [tokenId]
+  );
+}
+
+async function resolveWorkspaceContextFromProject({ projectId, workspaceId = null }) {
+  const res = await query('select workspace_id from projects where id = $1', [projectId]);
+  const projectWorkspaceId = res.rows[0]?.workspace_id || null;
+  if (!projectWorkspaceId) {
+    throw new ValidationError('project_not_found', { projectId });
+  }
+
+  if (workspaceId && String(projectWorkspaceId) !== String(workspaceId)) {
+    throw new ValidationError('workspace_project_mismatch', { workspaceId, projectId, projectWorkspaceId });
+  }
+
+  return {
+    projectId,
+    workspaceId: workspaceId || projectWorkspaceId,
+    projectWorkspaceId
+  };
+}
+
+async function authorizeIngestRequest(request, reply, { type, payload }) {
+  const bearer = parseBearerToken(request.headers.authorization);
+  if (!bearer) {
+    reply.code(401).send({ error: 'unauthorized' });
+    return null;
+  }
+
+  if (INGEST_AUTH_TOKEN && bearer === INGEST_AUTH_TOKEN) {
+    return { mode: 'static', token: null };
+  }
+
+  const token = await findActiveProjectIngestToken(bearer);
+  if (!token) {
+    reply.code(401).send({ error: 'unauthorized' });
+    return null;
+  }
+
+  if (type === INGEST_EVENT_TYPES.RUN_STARTED) {
+    if (String(payload.projectId) !== String(token.project_id)) {
+      reply.code(403).send({ error: 'token_scope_mismatch' });
+      return null;
+    }
+
+    if (payload.workspaceId && String(payload.workspaceId) !== String(token.workspace_id)) {
+      reply.code(403).send({ error: 'token_scope_mismatch' });
+      return null;
+    }
+
+    return { mode: 'project', token };
+  }
+
+  const runContext = payload.runId
+    ? await lookupRunContextByRunId(payload.runId)
+    : (payload.specRunId ? await lookupRunContextBySpecRunId(payload.specRunId) : null);
+
+  if (!runContext) {
+    reply.code(400).send({ error: 'run_context_required' });
+    return null;
+  }
+
+  const ctxWorkspaceId = runContext.workspace_id;
+  const ctxProjectId = runContext.project_id;
+
+  if (String(ctxWorkspaceId) != String(token.workspace_id) || String(ctxProjectId) != String(token.project_id)) {
+    reply.code(403).send({ error: 'token_scope_mismatch' });
+    return null;
+  }
+
+  return { mode: 'project', token };
+}
 function requireKeys(obj, keys) {
   return keys.every((k) => Object.prototype.hasOwnProperty.call(obj || {}, k));
 }
@@ -315,7 +415,8 @@ async function persistReplayV2Chunk(payload, idempotencyKey) {
 async function handleEvent(type, payload, { idempotencyKey } = {}) {
   switch (type) {
     case INGEST_EVENT_TYPES.RUN_STARTED: {
-      if (!requireKeys(payload, ['runId', 'workspaceId', 'projectId'])) throw new Error('run.started missing required fields');
+      if (!requireKeys(payload, ['runId', 'projectId'])) throw new Error('run.started missing required fields');
+      const context = await resolveWorkspaceContextFromProject({ projectId: payload.projectId, workspaceId: payload.workspaceId ?? null });
       await query(
         `insert into runs(id, workspace_id, project_id, ci_provider, ci_build_id, commit_sha, branch, status, started_at)
          values($1,$2,$3,$4,$5,$6,$7,'running',coalesce($8::timestamptz, now()))
@@ -323,8 +424,10 @@ async function handleEvent(type, payload, { idempotencyKey } = {}) {
             ci_provider=coalesce(excluded.ci_provider, runs.ci_provider),
             ci_build_id=coalesce(excluded.ci_build_id, runs.ci_build_id),
             commit_sha=coalesce(excluded.commit_sha, runs.commit_sha),
-            branch=coalesce(excluded.branch, runs.branch)`,
-        [payload.runId, payload.workspaceId, payload.projectId, payload.ciProvider ?? null, payload.ciBuildId ?? null, payload.commitSha ?? null, payload.branch ?? null, payload.startedAt ?? null]
+            branch=coalesce(excluded.branch, runs.branch),
+            workspace_id=excluded.workspace_id,
+            project_id=excluded.project_id`,
+        [payload.runId, context.workspaceId, payload.projectId, payload.ciProvider ?? null, payload.ciBuildId ?? null, payload.commitSha ?? null, payload.branch ?? null, payload.startedAt ?? null]
       );
       return;
     }
@@ -470,10 +573,17 @@ app.post('/v1/ingest/events', async (request, reply) => {
     throw error;
   }
 
+  const auth = await authorizeIngestRequest(request, reply, { type, payload });
+  if (!auth) return;
+
   try {
     const result = await withIdempotency(idempotencyKey, type, payload, async () => {
       await handleEvent(type, payload, { idempotencyKey });
     });
+
+    if (auth.mode === 'project' && auth.token?.id) {
+      await markProjectIngestTokenUsed(auth.token.id);
+    }
 
     return reply.code(result.duplicate ? 200 : 202).send({ ok: true, ...result });
   } catch (error) {
