@@ -1023,7 +1023,7 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
             <small>${escapeHtml(stream.transport_kind || 'ws+msgpack')} · ACK ${stream.ack_received ? 'yes' : 'no'} · stride ${escapeHtml(stream.seek_stride ?? '50')}</small>
             <small>Updated ${escapeHtml(formatDate(stream.updated_at))}</small>
           </article>`).join('')}
-        </div>` : '<div class="empty-state"><h3>No replay streams</h3><p>This run has no persisted Replay V2 stream rows yet.</p></div>'}
+        </div>` : '<div class="empty-state"><h3>No replay streams</h3><p>This run has no persisted <code>replay.v2.chunk</code> data yet. If you are using the local smoke flow, ensure it emits replay chunks for the created run before <code>run.finished</code>.</p></div>'}
       </section>
       <section class="panel">
         <div class="panel-header">
