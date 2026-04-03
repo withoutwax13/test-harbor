@@ -10,7 +10,8 @@ const files = [
   "infra/db/migrations/004_webhook_deliveries.sql",
   "infra/db/migrations/005_batches_11_18.sql",
   "infra/db/migrations/006_batches_19_26.sql",
-  "infra/db/migrations/007_project_ingest_tokens.sql"
+  "infra/db/migrations/007_project_ingest_tokens.sql",
+  "infra/db/migrations/008_replay_v2_storage.sql"
 ];
 
 for (const file of files) {
