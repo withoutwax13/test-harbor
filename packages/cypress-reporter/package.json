@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./browser": "./src/browser.js"
   },
   "dependencies": {
     "@testharbor/shared": "0.1.0"

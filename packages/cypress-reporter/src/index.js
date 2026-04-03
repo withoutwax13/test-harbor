@@ -124,6 +124,99 @@ function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
 }
 
+function parseBoolean(value, fallback = true) {
+  if (value == null) return fallback;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function resolveExistingSupportFile(config, generatedSupportFile) {
+  const projectRoot = asTrimmedString(config?.projectRoot) || process.cwd();
+  const configured = config?.e2e?.supportFile;
+
+  if (configured === false) return null;
+  if (typeof configured === 'string' && configured.trim()) {
+    const explicit = path.isAbsolute(configured)
+      ? configured
+      : path.resolve(projectRoot, configured);
+    if (path.resolve(explicit) !== path.resolve(generatedSupportFile) && fs.existsSync(explicit)) {
+      return explicit;
+    }
+  }
+
+  const candidates = [
+    'cypress/support/e2e.ts',
+    'cypress/support/e2e.js',
+    'cypress/support/e2e.mjs',
+    'cypress/support/e2e.cjs',
+    'cypress/support/index.ts',
+    'cypress/support/index.js',
+    'cypress/support/index.mjs',
+    'cypress/support/index.cjs'
+  ];
+
+  for (const relativeCandidate of candidates) {
+    const candidate = path.resolve(projectRoot, relativeCandidate);
+    if (path.resolve(candidate) === path.resolve(generatedSupportFile)) continue;
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  return null;
+}
+
+function toImportSpecifier(fromFile, targetFile) {
+  let relative = path.relative(path.dirname(fromFile), targetFile).split(path.sep).join('/');
+  if (!relative.startsWith('.')) relative = `./${relative}`;
+  return relative;
+}
+
+function installAutoReplaySupport(config, options = {}) {
+  const enabled = parseBoolean(
+    options.autoReplaySupport
+      ?? config?.env?.TESTHARBOR_AUTO_REPLAY_SUPPORT
+      ?? process.env.TESTHARBOR_AUTO_REPLAY_SUPPORT,
+    true
+  );
+  if (!enabled) {
+    return { enabled: false, generatedSupportFile: null, previousSupportFile: null };
+  }
+
+  const projectRoot = asTrimmedString(config?.projectRoot) || process.cwd();
+  const generatedSupportFile = path.resolve(projectRoot, '.testharbor', 'replay-support.generated.mjs');
+  ensureDir(path.dirname(generatedSupportFile));
+
+  const previousSupportFile = resolveExistingSupportFile(config, generatedSupportFile);
+  const lines = [];
+  if (previousSupportFile) {
+    lines.push(`import ${JSON.stringify(toImportSpecifier(generatedSupportFile, previousSupportFile))};`);
+  }
+  lines.push("import { installTestHarborReplayHooks } from '@testharbor/cypress-reporter/browser';");
+  lines.push("installTestHarborReplayHooks({ source: 'auto-generated-support' });");
+  lines.push('');
+
+  fs.writeFileSync(generatedSupportFile, `${lines.join('\n')}\n`);
+
+  config.e2e = {
+    ...(config.e2e || {}),
+    supportFile: generatedSupportFile
+  };
+  config.env = {
+    ...(config.env || {}),
+    TESTHARBOR_AUTO_REPLAY_SUPPORT: true,
+    TESTHARBOR_REPLAY_SUPPORT_FILE: generatedSupportFile
+  };
+
+  return {
+    enabled: true,
+    generatedSupportFile,
+    previousSupportFile
+  };
+}
+
 function normalizeReplayPayload(input) {
   return JSON.parse(JSON.stringify(input));
 }
@@ -723,6 +816,8 @@ export function setupTestHarbor(on, config, options = {}) {
     || asTrimmedString(process.env.TESTHARBOR_RUN_ID)
     || crypto.randomUUID();
 
+  const supportInstall = installAutoReplaySupport(config, options);
+
   const client = new TestHarborReporterClient({
     ingestUrl,
     token,
@@ -750,37 +845,60 @@ export function setupTestHarbor(on, config, options = {}) {
     }
   };
 
+  const replayTaskHandlers = {
+    event: async (entry) => client.queueReplayEvent(entry || {}),
+    command: async (entry) => client.queueCommandEvent(entry || {}),
+    dom: async (entry) => client.queueDomEvent(entry || {}),
+    network: async (entry) => client.queueNetworkEvent(entry || {}),
+    console: async (entry) => client.queueConsoleEvent(entry || {}),
+    'target:declare': async (entry) => client.declareReplayTarget(entry || {}),
+    'target:bind': async (entry) => client.bindReplayTarget(entry || {}),
+    'target:rebind': async (entry) => client.rebindReplayTarget(entry || {}),
+    'target:orphan': async (entry) => client.markReplayTargetOrphan(entry || {})
+  };
+
   on('task', {
     'testharbor:log'(entry) {
       // Keep API stable for tests that want to emit custom logs through cy.task().
       return entry || null;
     },
+    async 'testharbor:replay:batch'(entries) {
+      const batch = Array.isArray(entries) ? entries : [];
+      for (const item of batch) {
+        const kind = asTrimmedString(item?.kind);
+        const payload = item?.payload || {};
+        const handler = kind ? replayTaskHandlers[kind] : null;
+        if (!handler) continue;
+        await handler(payload);
+      }
+      return { ok: true, count: batch.length };
+    },
     async 'testharbor:replay:event'(entry) {
-      return client.queueReplayEvent(entry || {});
+      return replayTaskHandlers.event(entry);
     },
     async 'testharbor:replay:command'(entry) {
-      return client.queueCommandEvent(entry || {});
+      return replayTaskHandlers.command(entry);
     },
     async 'testharbor:replay:dom'(entry) {
-      return client.queueDomEvent(entry || {});
+      return replayTaskHandlers.dom(entry);
     },
     async 'testharbor:replay:network'(entry) {
-      return client.queueNetworkEvent(entry || {});
+      return replayTaskHandlers.network(entry);
     },
     async 'testharbor:replay:console'(entry) {
-      return client.queueConsoleEvent(entry || {});
+      return replayTaskHandlers.console(entry);
     },
     async 'testharbor:replay:target:declare'(entry) {
-      return client.declareReplayTarget(entry || {});
+      return replayTaskHandlers['target:declare'](entry);
     },
     async 'testharbor:replay:target:bind'(entry) {
-      return client.bindReplayTarget(entry || {});
+      return replayTaskHandlers['target:bind'](entry);
     },
     async 'testharbor:replay:target:rebind'(entry) {
-      return client.rebindReplayTarget(entry || {});
+      return replayTaskHandlers['target:rebind'](entry);
     },
     async 'testharbor:replay:target:orphan'(entry) {
-      return client.markReplayTargetOrphan(entry || {});
+      return replayTaskHandlers['target:orphan'](entry);
     },
     async 'testharbor:replay:flush'() {
       return client.flushReplayV2Chunk();
@@ -993,7 +1111,10 @@ export function setupTestHarbor(on, config, options = {}) {
     ...(config.env || {}),
     TESTHARBOR_RUN_ID: runId,
     TESTHARBOR_PROJECT_ID: projectId,
-    ...(workspaceId ? { TESTHARBOR_WORKSPACE_ID: workspaceId } : {})
+    ...(workspaceId ? { TESTHARBOR_WORKSPACE_ID: workspaceId } : {}),
+    ...(supportInstall?.generatedSupportFile
+      ? { TESTHARBOR_REPLAY_SUPPORT_FILE: supportInstall.generatedSupportFile }
+      : {})
   };
 
   return config;
