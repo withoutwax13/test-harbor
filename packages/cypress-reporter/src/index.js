@@ -13,6 +13,7 @@ import {
   createReplayV2SequenceTracker,
   createReplayV2TargetRegistry,
   encodeMessagePack,
+  decodeMessagePack,
   getStableReplayV2TargetId,
   normalizeReplayV2SelectorBundle
 } from '@testharbor/shared';
@@ -137,7 +138,7 @@ class HarborSegmentWriter {
   }
 
   appendFrame(frame) {
-    const payload = Buffer.from(JSON.stringify(normalizeReplayPayload(frame)));
+    const payload = encodeMessagePack(normalizeReplayPayload(frame));
     const header = Buffer.allocUnsafe(4);
     header.writeUInt32BE(payload.length, 0);
     const segmentPath = path.join(this.rootDir, `${String(this.segmentIndex).padStart(6, '0')}.harbor`);
@@ -211,6 +212,21 @@ function parseWebSocketFrames(buffer, onFrame) {
   return buffer.subarray(offset);
 }
 
+function decodeTransportMessage(opcode, payload) {
+  if (!Buffer.isBuffer(payload) || payload.length === 0) return null;
+  try {
+    if (opcode === 0x2) return decodeMessagePack(payload);
+    if (opcode === 0x1) return JSON.parse(payload.toString('utf8'));
+  } catch {
+    try {
+      return JSON.parse(payload.toString('utf8'));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 class ReplayTransportServer {
   constructor({ port = 9223 } = {}) {
     this.port = port;
@@ -249,12 +265,7 @@ class ReplayTransportServer {
             return;
           }
           if (opcode !== 0x2 && opcode !== 0x1) return;
-          let message = null;
-          try {
-            message = opcode === 0x2 ? JSON.parse(payload.toString('utf8')) : JSON.parse(payload.toString('utf8'));
-          } catch {
-            message = null;
-          }
+          const message = decodeTransportMessage(opcode, payload);
           if (message?.type === 'TRANSPORT_ACK' && message.finId) {
             this.acknowledgeFin(message.finId, { clientAck: true, ts: new Date().toISOString() });
           }
@@ -276,7 +287,17 @@ class ReplayTransportServer {
   requestFinAck(finId, meta = {}) {
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
-        this.acknowledgeFin(finId, { ...meta, timeoutFallback: true, ok: true });
+        const pending = this.pendingFin.get(finId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingFin.delete(finId);
+        pending.resolve({
+          ok: false,
+          finId,
+          timeoutFallback: true,
+          timeoutMs: 250,
+          ...meta
+        });
       }, 250);
       this.pendingFin.set(finId, { resolve, timeout });
       this.broadcast({ type: 'TRANSPORT_FIN', finId, meta });
@@ -618,12 +639,18 @@ export class TestHarborReporterClient {
       runId: replay.runId,
       streamId: replay.streamId
     });
-    await this.queueReplayLifecycle(REPLAY_V2_LIFECYCLE_EVENTS.TRANSPORT_ACK, {
-      finId,
-      ack
-    }, { flushIfNeeded: false });
-    const ackSegment = replay.harborWriter.appendFrame({ type: 'TRANSPORT_ACK', finId, ack });
-    const ackResult = await this.flushReplayV2Chunk({ final: true });
+
+    let ackSegment = null;
+    let ackResult = null;
+    if (ack?.ok) {
+      await this.queueReplayLifecycle(REPLAY_V2_LIFECYCLE_EVENTS.TRANSPORT_ACK, {
+        finId,
+        ack
+      }, { flushIfNeeded: false });
+      ackSegment = replay.harborWriter.appendFrame({ type: 'TRANSPORT_ACK', finId, ack });
+      ackResult = await this.flushReplayV2Chunk({ final: true });
+    }
+
     this.replayV2 = null;
     return { ...result, ack, ackResult, ackSegment };
   }

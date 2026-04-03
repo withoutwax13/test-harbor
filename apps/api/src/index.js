@@ -2017,7 +2017,8 @@ app.get('/v1/runs/:id/replay-v2/metrics', { preHandler: workspaceGuard({ role: '
   if (!streamId) return reply.code(400).send({ error: 'stream_id_required' });
 
   const { rows } = await query(
-    `select stream_id, event_count, actionable_command_count, aligned_command_count, target_resolved_count,
+    `select stream_id, first_seq, last_seq, event_count,
+            actionable_command_count, aligned_command_count, target_resolved_count,
             orphan_count, final_received, ack_received, fin_seq, ack_seq, seek_stride, updated_at
      from replay_v2_streams
      where run_id = $1 and stream_id = $2`,
@@ -2029,11 +2030,19 @@ app.get('/v1/runs/:id/replay-v2/metrics', { preHandler: workspaceGuard({ role: '
   const actionable = Number(stream.actionable_command_count || 0);
   const alignment = actionable > 0 ? Number(stream.aligned_command_count || 0) / actionable : 1;
   const targetStability = actionable > 0 ? Number(stream.target_resolved_count || 0) / actionable : 1;
+  const firstSeq = Number(stream.first_seq || 0);
+  const lastSeq = Number(stream.last_seq || 0);
+  const eventCount = Number(stream.event_count || 0);
+  const expectedSpan = eventCount > 0 && firstSeq > 0 && lastSeq >= firstSeq ? (lastSeq - firstSeq + 1) : eventCount;
+  const gapCount = Math.max(0, expectedSpan - eventCount);
 
   return {
     item: {
       ...stream,
-      seqContinuity: { zeroGaps: true },
+      seqContinuity: {
+        zeroGaps: gapCount === 0,
+        gapCount
+      },
       finAckSuccess: Boolean(stream.final_received && stream.ack_received),
       commandToDomAlignment: alignment,
       targetStability,

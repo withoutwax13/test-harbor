@@ -23,7 +23,7 @@ Replay V2 now follows a contract-first pipeline with a stable target identity la
 ## Phase B
 
 - `setupNodeEvents` now starts a dedicated WS transport server on port `9223` by default.
-- Replay chunks are appended to segmented `.harbor` files beneath `.harbor/replay-v2/<run>/<stream>/`.
+- Replay chunks are appended to segmented `.harbor` files beneath `.harbor/replay-v2/<run>/<stream>/` as length-prefixed MessagePack frames.
 - Transport metadata is persisted on replay chunks.
 - FIN/ACK is represented as lifecycle protocol events and persisted into stream/chunk state.
 
@@ -75,6 +75,6 @@ Derived gates:
 Use:
 
 - `node scripts/replay-v2-gate-artifacts.mjs`
-- `node scripts/replay-v2-fin-ack-check.mjs <segment-dir>`
+- `node scripts/replay-v2-fin-ack-check.mjs <segment-dir>` (exits non-zero unless both FIN and ACK are present and correlated)
 - `node --check <touched-js-file>`
 - `git diff --check`

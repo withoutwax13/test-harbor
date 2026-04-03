@@ -941,6 +941,9 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
   const inspect = seek?.liveInspect || null;
   const alignmentPct = metrics ? `${Math.round((metrics.commandToDomAlignment || 0) * 100)}%` : 'n/a';
   const targetPct = metrics ? `${Math.round((metrics.targetStability || 0) * 100)}%` : 'n/a';
+  const seqContinuityText = metrics
+    ? (metrics.seqContinuity?.zeroGaps ? 'zero gaps' : `${metrics.seqContinuity?.gapCount || 0} gaps`)
+    : 'n/a';
 
   return renderLayout({
     title: `Replay V2 ${String(runId).slice(0, 8)}`,
@@ -989,6 +992,7 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
         </div>
         ${metrics ? `<div class="metrics-grid">
           ${summaryCard('FIN/ACK', metrics.finAckSuccess ? '100%' : 'pending', `FIN ${metrics.fin_seq || 'n/a'} · ACK ${metrics.ack_seq || 'n/a'}`)}
+          ${summaryCard('Seq continuity', seqContinuityText, metrics.seqContinuity?.zeroGaps ? 'No missing sequence numbers' : 'Investigate replay chunk ordering')}
           ${summaryCard('Cmd→DOM', alignmentPct, `${metrics.aligned_command_count || 0}/${metrics.actionable_command_count || 0} actionable`)}
           ${summaryCard('Target Stability', targetPct, `${metrics.target_resolved_count || 0}/${metrics.actionable_command_count || 0} resolved`)}
           ${summaryCard('Orphans', String(metrics.orphan_count || 0), metrics.orphanSpamRisk ? 'Above normal-run threshold' : 'Within normal-run threshold')}
@@ -1033,7 +1037,7 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
         ${!selectedStream ? '<div class="empty-state"><h3>No stream selected</h3><p>Select a replay stream to inspect ordered events.</p></div>' : events.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Seq</th><th>Kind</th><th>Timestamp</th><th>Monotonic</th><th>Command</th><th>Target</th><th>Payload</th><th>Chunk</th></tr></thead>
           <tbody>
-            ${events.map((event) => `<tr>
+            ${events.map((event) => `<tr${inspect?.targetId && event.target_id === inspect.targetId ? ' style="background: rgba(245, 158, 11, 0.12);"' : ''}>
               <td>${escapeHtml(event.seq)}</td>
               <td><code>${escapeHtml(event.kind)}</code></td>
               <td>${escapeHtml(formatDate(event.ts))}</td>
@@ -1057,7 +1061,7 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
         ${!selectedStream ? '<div class="empty-state"><h3>No stream selected</h3><p>Select a replay stream to inspect target registry state.</p></div>' : targets.length ? `<div class="table-wrap"><table>
           <thead><tr><th>Target</th><th>Version</th><th>State</th><th>Lifecycle</th><th>Seq</th><th>DOM signature</th><th>Selectors</th></tr></thead>
           <tbody>
-            ${targets.map((target) => `<tr>
+            ${targets.map((target) => `<tr${inspect?.targetId && target.target_id === inspect.targetId ? ' style="background: rgba(59, 130, 246, 0.12);"' : ''}>
               <td><code>${escapeHtml(target.target_id)}</code></td>
               <td>${escapeHtml(target.selector_version)}</td>
               <td>${escapeHtml(target.state)}</td>
