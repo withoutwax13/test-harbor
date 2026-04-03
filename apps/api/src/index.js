@@ -1833,13 +1833,17 @@ app.get('/v1/runs/:id/replay-v2/events', { preHandler: workspaceGuard({ role: 'v
 
   const fromSeq = normalizeOptionalInt(request.query?.fromSeq, { min: 1 });
   const toSeq = normalizeOptionalInt(request.query?.toSeq, { min: 1 });
-  const normalizedLimit = normalizeLimit(request.query?.limit, 300, 1000);
+  const parsedLimit = normalizeOptionalInt(request.query?.limit, { min: 1, max: 1000 });
+  const normalizedLimit = parsedLimit ?? 300;
 
   if ((request.query?.fromSeq ?? '') !== '' && fromSeq === null) {
     return reply.code(400).send({ error: 'invalid_from_seq' });
   }
   if ((request.query?.toSeq ?? '') !== '' && toSeq === null) {
     return reply.code(400).send({ error: 'invalid_to_seq' });
+  }
+  if ((request.query?.limit ?? '') !== '' && parsedLimit === null) {
+    return reply.code(400).send({ error: 'invalid_limit' });
   }
   if (fromSeq !== null && toSeq !== null && fromSeq > toSeq) {
     return reply.code(400).send({ error: 'invalid_seq_range' });

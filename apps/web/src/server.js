@@ -1654,13 +1654,22 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
 
   const streamsResp = await apiFetch(`/v1/runs/${request.params.id}/replay-v2/streams`, { token: shell.session.token });
   const streams = streamsResp.items || [];
-  const selectedStreamId = String(request.query?.streamId || streams[0]?.stream_id || '');
-  const eventsResp = selectedStreamId
-    ? await apiFetch(`/v1/runs/${request.params.id}/replay-v2/events?${new URLSearchParams({
-      streamId: selectedStreamId,
-      limit: '300'
-    }).toString()}`, { token: shell.session.token })
-    : { items: [], pageInfo: { total: 0, limit: 300 } };
+  const requestedStreamId = String(request.query?.streamId || '').trim();
+  const selectedStreamId = streams.some((stream) => stream.stream_id === requestedStreamId)
+    ? requestedStreamId
+    : String(streams[0]?.stream_id || '');
+
+  let eventsResp = { items: [], pageInfo: { total: 0, limit: 300 } };
+  if (selectedStreamId) {
+    try {
+      eventsResp = await apiFetch(`/v1/runs/${request.params.id}/replay-v2/events?${new URLSearchParams({
+        streamId: selectedStreamId,
+        limit: '300'
+      }).toString()}`, { token: shell.session.token });
+    } catch (error) {
+      if (error.statusCode !== 404) throw error;
+    }
+  }
 
   return reply.type('text/html').send(renderReplayV2Page(shell, request.params.id, streamsResp, eventsResp, selectedStreamId));
 });

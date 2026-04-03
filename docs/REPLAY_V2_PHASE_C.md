@@ -44,6 +44,7 @@ Query params:
 - `fromSeq` optional
 - `toSeq` optional
 - `limit` optional, default `300`, max `1000`
+- invalid `fromSeq`, `toSeq`, or `limit` values return `400`
 
 Response shape:
 
@@ -87,6 +88,7 @@ Behavior:
 - selects `?streamId=` when provided, otherwise defaults to the first stream
 - fetches ordered events for the selected stream
 - renders empty states when the run has no replay streams or the selected stream has no events
+- invalid `?streamId=` values gracefully fall back to the first available stream
 
 The existing run detail page now links to the Replay V2 viewer.
 
