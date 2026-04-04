@@ -279,6 +279,13 @@ function getReplaySnapshot(event) {
   return payload?.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot : null;
 }
 
+function findLatestSnapshotEventIndex(events = []) {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    if (getReplaySnapshot(events[i])) return i;
+  }
+  return -1;
+}
+
 function renderLayout({ title, shell, currentPath, content }) {
   const user = shell.session?.user;
   const workspaceName = shell.selectedWorkspace?.name || 'No workspace';
@@ -964,11 +971,14 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
   const requestedEventSeq = Number.parseInt(String(eventSeq || '').trim(), 10);
   const hasRequestedEventSeq = Number.isFinite(requestedEventSeq) && requestedEventSeq > 0;
   let activeEventIndex = -1;
+  const latestSnapshotEventIndex = findLatestSnapshotEventIndex(events);
   if (events.length) {
     if (hasRequestedEventSeq) {
       activeEventIndex = events.findIndex((event) => Number(event.seq) === requestedEventSeq);
     }
-    if (activeEventIndex === -1) activeEventIndex = events.length - 1;
+    if (activeEventIndex === -1) {
+      activeEventIndex = latestSnapshotEventIndex >= 0 ? latestSnapshotEventIndex : events.length - 1;
+    }
   }
   const activeEvent = activeEventIndex >= 0 ? events[activeEventIndex] : null;
   const activeEventSeq = activeEvent ? Number(activeEvent.seq) : null;
@@ -1001,7 +1011,7 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
         <div>
           <p class="eyebrow">Replay V2</p>
           <h2>Persisted replay streams for run <code>${escapeHtml(String(runId))}</code></h2>
-          <p>Read model over replay_v2_streams, replay_v2_chunks, and replay_v2_events for basic browser inspection.</p>
+          <p>Visual replay from persisted replay_v2 streams, chunks, and events.</p>
         </div>
         <div class="hero-metrics">
           ${summaryCard('Streams', String(streams.length), selectedStream ? `Selected: ${selectedStream.stream_id}` : 'No replay streams')}
@@ -1009,6 +1019,7 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
           ${summaryCard('Selection', selectedStreamId || 'none', selectedStream ? `Seq ${selectedStream.first_seq || 'n/a'}-${selectedStream.last_seq || 'n/a'}` : 'Select a stream')}
           ${summaryCard('Requested', requestedStreamId || 'none', requestedStreamId ? (requestedStreamFound ? 'Matched stream' : 'Not found, showing first available stream') : 'No streamId query')}
           ${summaryCard('Active Event', activeEvent ? String(activeEvent.seq) : 'none', activeEvent ? `${activeEvent.kind} @ ${formatDate(activeEvent.ts)}` : 'Pick a stream with events')}
+          ${summaryCard('Snapshot events', latestSnapshotEventIndex >= 0 ? 'available' : 'none', latestSnapshotEventIndex >= 0 ? `Auto-focused seq ${events[latestSnapshotEventIndex].seq}` : 'No HTML snapshots in loaded range')}
           ${summaryCard('Seek', seekSeq || 'n/a', inspect?.targetId ? `Inspect ${inspect.targetId}` : 'Nearest checkpoint resolution')}
         </div>
       </section>
@@ -1086,7 +1097,7 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
           </div>
           ${activeSnapshot ? badge(activeSnapshot.truncated ? 'Snapshot truncated' : 'Snapshot ready', activeSnapshot.truncated ? 'warning' : 'success') : ''}
         </div>
-        ${!selectedStream ? '<div class="empty-state"><h3>No stream selected</h3><p>Select a replay stream to inspect visual playback.</p></div>' : !activeEvent ? '<div class="empty-state"><h3>No active event</h3><p>Select an event sequence to inspect its snapshot.</p></div>' : !activeSnapshot || !sanitizedSnapshotHtml ? '<div class="empty-state"><h3>No visual snapshot</h3><p>The active event does not include a browser HTML snapshot.</p></div>' : `<div class="metrics-grid">
+        ${!selectedStream ? '<div class="empty-state"><h3>No stream selected</h3><p>Select a replay stream to inspect visual playback.</p></div>' : !activeEvent ? '<div class="empty-state"><h3>No active event</h3><p>Select an event sequence to inspect its snapshot.</p></div>' : !activeSnapshot || !sanitizedSnapshotHtml ? '<div class="empty-state"><h3>No visual snapshot</h3><p>The active event does not include a browser HTML snapshot. Choose an event with snapshot payload from the Events table.</p></div>' : `<div class="metrics-grid">
           ${summaryCard('URL', activeSnapshotMeta.url || 'n/a', activeSnapshotMeta.title || 'No document title')}
           ${summaryCard('Viewport', activeSnapshotMeta.viewport ? `${activeSnapshotMeta.viewport.width || 0}×${activeSnapshotMeta.viewport.height || 0}` : 'n/a', activeSnapshotMeta.viewport?.devicePixelRatio ? `DPR ${activeSnapshotMeta.viewport.devicePixelRatio}` : 'No DPR')}
           ${summaryCard('Scroll', activeSnapshotMeta.scroll ? `${activeSnapshotMeta.scroll.x || 0}, ${activeSnapshotMeta.scroll.y || 0}` : 'n/a', activeSnapshotMeta.readyState || 'No readyState')}
