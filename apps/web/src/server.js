@@ -115,90 +115,6 @@ function formatBytes(bytes) {
   return `${size.toFixed(size >= 100 ? 0 : 1)} ${unit}`;
 }
 
-function getArtifactMediaKind(artifact) {
-  const type = String(artifact?.type || '').toLowerCase();
-  const contentType = String(artifact?.content_type || '').toLowerCase();
-  if (type.includes('video') || contentType.startsWith('video/')) return 'video';
-  if (type.includes('image') || type.includes('screenshot') || contentType.startsWith('image/')) return 'image';
-  return '';
-}
-
-function summarizeErrorSnippet(value, fallback = '') {
-  const snippet = String(value || fallback || '').replace(/\s+/g, ' ').trim();
-  return snippet ? snippet.slice(0, 180) : 'n/a';
-}
-
-function formatFallbackStepTone(status, kind = '') {
-  const normalizedStatus = String(status || '').toLowerCase();
-  if (normalizedStatus === 'failed') return 'danger';
-  if (normalizedStatus === 'flaky') return 'warning';
-  if (normalizedStatus === 'passed') return 'success';
-  if (normalizedStatus === 'running' || normalizedStatus === 'pending') return 'warning';
-  if (String(kind || '').startsWith('artifact')) return 'neutral';
-  return 'neutral';
-}
-
-function buildFallbackReplaySteps(runDetail) {
-  const specs = runDetail?.specs || [];
-  const tests = runDetail?.tests || [];
-  const artifacts = runDetail?.artifacts || [];
-  const stepCandidates = [
-    ...specs.map((spec, index) => ({
-      ts: spec.finished_at || spec.started_at || spec.created_at || '',
-      orderGroup: 1,
-      orderIndex: index,
-      kind: 'spec',
-      status: spec.status || 'unknown',
-      title: spec.spec_path || spec.id || `spec-${index + 1}`,
-      file: spec.spec_path || 'n/a',
-      error: spec.error_message || '',
-      detail: `attempts=${spec.attempts || 0} • duration=${formatDuration(spec.duration_ms)}`,
-      rawId: spec.id || spec.spec_path || `spec-${index + 1}`
-    })),
-    ...tests.map((test, index) => ({
-      ts: test.created_at || test.finished_at || test.started_at || '',
-      orderGroup: 2,
-      orderIndex: index,
-      kind: 'test',
-      status: test.status || 'unknown',
-      title: test.test_title || test.test_case_id || test.id || `test-${index + 1}`,
-      file: test.file_path || 'n/a',
-      error: test.error_message || test.stacktrace || '',
-      detail: [
-        test.test_case_id ? `case=${test.test_case_id}` : '',
-        test.stacktrace ? 'stacktrace captured' : '',
-        test.error_message ? summarizeErrorSnippet(test.error_message) : ''
-      ].filter(Boolean).join(' • ') || 'No extra test detail',
-      rawId: test.id || test.test_case_id || test.test_title || `test-${index + 1}`
-    })),
-    ...artifacts.map((artifact, index) => ({
-      ts: artifact.created_at || '',
-      orderGroup: 3,
-      orderIndex: index,
-      kind: 'artifact',
-      status: getArtifactMediaKind(artifact) || artifact.type || 'registered',
-      title: artifact.path || artifact.file_path || artifact.type || artifact.id || `artifact-${index + 1}`,
-      file: artifact.content_type || 'application/octet-stream',
-      error: '',
-      detail: `${formatBytes(artifact.byte_size)} • ${artifact.id || 'artifact'} registered`,
-      rawId: artifact.id || artifact.path || artifact.file_path || `artifact-${index + 1}`
-    }))
-  ];
-
-  return stepCandidates
-    .sort((a, b) => {
-      const tsDelta = new Date(a.ts || 0).getTime() - new Date(b.ts || 0).getTime();
-      if (tsDelta !== 0) return tsDelta;
-      if (a.orderGroup !== b.orderGroup) return a.orderGroup - b.orderGroup;
-      if (a.orderIndex !== b.orderIndex) return a.orderIndex - b.orderIndex;
-      return String(a.rawId).localeCompare(String(b.rawId));
-    })
-    .map((step, index) => ({
-      ...step,
-      seq: index + 1
-    }));
-}
-
 function slugify(value, fallback = 'item') {
   const slug = String(value || '')
     .toLowerCase()
@@ -348,6 +264,19 @@ function metric(label, value) {
 function formatJsonInline(value) {
   if (value === undefined || value === null) return '<span class="muted">n/a</span>';
   return `<details><summary>view</summary><pre class="code-block">${escapeHtml(JSON.stringify(value, null, 2))}</pre></details>`;
+}
+
+function sanitizeSnapshotHtml(value) {
+  const html = String(value || '');
+  if (!html) return '';
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+}
+
+function getReplaySnapshot(event) {
+  const payload = event?.payload_json || event?.data_json || null;
+  return payload?.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot : null;
 }
 
 function renderLayout({ title, shell, currentPath, content }) {
@@ -1014,7 +943,7 @@ ${test.stacktrace || 'No stacktrace captured'}`)}</pre>
   });
 }
 
-function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStreamId, metricsResp, targetsResp, seekResp, seekSeq, selectionMeta = {}, eventSeq = '', fallbackBundle = null) {
+function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStreamId, metricsResp, targetsResp, seekResp, seekSeq, selectionMeta = {}, eventSeq = '') {
   const streams = streamsResp.items || [];
   const events = eventsResp.items || [];
   const pageInfo = eventsResp.pageInfo || { total: events.length, limit: events.length };
@@ -1026,12 +955,6 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
   const targets = targetsResp?.items || [];
   const seek = seekResp?.item || null;
   const inspect = seek?.liveInspect || null;
-  const fallbackRunDetail = fallbackBundle?.runDetail || null;
-  const fallbackTests = fallbackRunDetail?.tests || [];
-  const fallbackSpecs = fallbackRunDetail?.specs || [];
-  const fallbackSteps = buildFallbackReplaySteps(fallbackRunDetail);
-  const fallbackFailures = fallbackTests.filter((test) => String(test.status || '').toLowerCase() === 'failed');
-  const fallbackFlaky = fallbackTests.filter((test) => String(test.status || '').toLowerCase() === 'flaky');
   const alignmentPct = metrics ? `${Math.round((metrics.commandToDomAlignment || 0) * 100)}%` : 'n/a';
   const targetPct = metrics ? `${Math.round((metrics.targetStability || 0) * 100)}%` : 'n/a';
   const seqContinuityText = metrics
@@ -1051,18 +974,9 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
   const activeEventSeq = activeEvent ? Number(activeEvent.seq) : null;
   const prevEvent = activeEventIndex > 0 ? events[activeEventIndex - 1] : null;
   const nextEvent = activeEventIndex >= 0 && activeEventIndex < events.length - 1 ? events[activeEventIndex + 1] : null;
-  let activeFallbackStepIndex = -1;
-  if (!streams.length && fallbackSteps.length) {
-    if (hasRequestedEventSeq) {
-      activeFallbackStepIndex = fallbackSteps.findIndex((step) => Number(step.seq) === requestedEventSeq);
-    }
-    if (activeFallbackStepIndex === -1) activeFallbackStepIndex = fallbackSteps.length - 1;
-  }
-  const activeFallbackStep = activeFallbackStepIndex >= 0 ? fallbackSteps[activeFallbackStepIndex] : null;
-  const prevFallbackStep = activeFallbackStepIndex > 0 ? fallbackSteps[activeFallbackStepIndex - 1] : null;
-  const nextFallbackStep = activeFallbackStepIndex >= 0 && activeFallbackStepIndex < fallbackSteps.length - 1
-    ? fallbackSteps[activeFallbackStepIndex + 1]
-    : null;
+  const activeSnapshot = getReplaySnapshot(activeEvent);
+  const activeSnapshotMeta = activeSnapshot?.metadata || {};
+  const sanitizedSnapshotHtml = sanitizeSnapshotHtml(activeSnapshot?.html || '');
 
   const baseReplayPath = `/app/runs/${encodeURIComponent(String(runId))}/replay-v2`;
   const buildReplayHref = ({ streamId = selectedStreamId, seq = seekSeq, eventSeq: nextEventSeq = activeEventSeq } = {}) => {
@@ -1093,12 +1007,12 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
           ${summaryCard('Streams', String(streams.length), selectedStream ? `Selected: ${selectedStream.stream_id}` : 'No replay streams')}
           ${summaryCard('Events shown', String(events.length), `${pageInfo.total || 0} matching rows`)}
           ${summaryCard('Selection', selectedStreamId || 'none', selectedStream ? `Seq ${selectedStream.first_seq || 'n/a'}-${selectedStream.last_seq || 'n/a'}` : 'Select a stream')}
-          ${summaryCard('Requested', requestedStreamId || 'none', requestedStreamId ? (requestedStreamFound ? 'Matched stream' : 'Not found, fallback applied') : 'No streamId query')}
+          ${summaryCard('Requested', requestedStreamId || 'none', requestedStreamId ? (requestedStreamFound ? 'Matched stream' : 'Not found, showing first available stream') : 'No streamId query')}
           ${summaryCard('Active Event', activeEvent ? String(activeEvent.seq) : 'none', activeEvent ? `${activeEvent.kind} @ ${formatDate(activeEvent.ts)}` : 'Pick a stream with events')}
           ${summaryCard('Seek', seekSeq || 'n/a', inspect?.targetId ? `Inspect ${inspect.targetId}` : 'Nearest checkpoint resolution')}
         </div>
       </section>
-      ${fallbackUsed ? `<section class="panel" style="border-color:#f59e0b;"><div class="panel-header"><div><h2>Stream fallback applied</h2><p>Requested stream <code>${escapeHtml(requestedStreamId)}</code> was not found for this run. Showing <code>${escapeHtml(selectedStreamId || 'none')}</code> instead.</p></div></div></section>` : ''}
+      ${fallbackUsed ? `<section class="panel" style="border-color:#f59e0b;"><div class="panel-header"><div><h2>Requested stream unavailable</h2><p>Requested stream <code>${escapeHtml(requestedStreamId)}</code> was not found for this run. Showing <code>${escapeHtml(selectedStreamId || 'none')}</code> instead.</p></div></div></section>` : ''}
       <section class="panel">
         <div class="panel-header">
           <div>
@@ -1125,66 +1039,13 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
             <small>${escapeHtml(stream.transport_kind || 'ws+msgpack')} · ACK ${stream.ack_received ? 'yes' : 'no'} · stride ${escapeHtml(stream.seek_stride ?? '50')}</small>
             <small>Updated ${escapeHtml(formatDate(stream.updated_at))}</small>
           </article>`).join('')}
-        </div>` : '<div class="empty-state"><h3>No replay streams</h3><p>No persisted <code>replay.v2.chunk</code> data exists for this run. Use the artifact-backed replay section below to triage the run, or verify replay chunk ingest before <code>run.finished</code>.</p></div>'}
+        </div>` : '<div class="empty-state"><h3>No replay streams</h3><p>No persisted <code>replay.v2.chunk</code> data exists for this run. Verify browser-side replay capture and chunk ingest for this run.</p></div>'}
       </section>
-      ${!streams.length && fallbackRunDetail ? `<section class="panel">
-        <div class="panel-header">
-          <div>
-            <h2>Cypress-Style Step Replay (fallback)</h2>
-            <p>No persisted replay streams were found for this run. Using run detail specs, tests, and artifacts to synthesize a step timeline instead.</p>
-          </div>
-          <a class="button button-secondary" href="/app/runs/${escapeHtml(String(runId))}">Back to run</a>
-        </div>
-        <div class="metrics-grid">
-          ${summaryCard('Steps', String(fallbackSteps.length), fallbackSteps.length ? `Active step ${activeFallbackStep?.seq || fallbackSteps.length}` : 'No synthetic steps')}
-          ${summaryCard('Tests', String(fallbackTests.length), `${fallbackSpecs.length} specs recorded`)}
-          ${summaryCard('Failures', String(fallbackFailures.length), `${fallbackFailures.length ? 'Needs triage' : 'No failed tests'}`)}
-          ${summaryCard('Flaky', String(fallbackFlaky.length), fallbackFlaky.length ? 'Retry signal present' : 'No flaky tests')}
-        </div>
-        ${fallbackSteps.length ? `<div class="row-actions" style="margin-top:1rem;">
-          ${prevFallbackStep ? `<a class="button button-secondary" href="${escapeHtml(buildReplayHref({ eventSeq: prevFallbackStep.seq }))}">← Prev step</a>` : '<button class="button button-secondary" type="button" disabled>← Prev step</button>'}
-          ${nextFallbackStep ? `<a class="button button-secondary" href="${escapeHtml(buildReplayHref({ eventSeq: nextFallbackStep.seq }))}">Next step →</a>` : '<button class="button button-secondary" type="button" disabled>Next step →</button>'}
-          <form method="GET" action="${baseReplayPath}" class="inline-form">
-            <label style="display:flex; flex-direction:column; gap:4px;">Step Seq
-              <input name="eventSeq" type="number" min="1" max="${escapeHtml(String(fallbackSteps.length))}" value="${escapeHtml(String(activeFallbackStep?.seq || fallbackSteps.length))}" />
-            </label>
-            <button class="button" type="submit">Jump</button>
-          </form>
-        </div>
-        <div class="table-wrap" style="margin-top:1rem;"><table>
-          <thead><tr><th>Field</th><th>Value</th></tr></thead>
-          <tbody>
-            <tr><td>Seq</td><td><code>${escapeHtml(activeFallbackStep?.seq || 'n/a')}</code></td></tr>
-            <tr><td>Kind</td><td>${activeFallbackStep ? badge(activeFallbackStep.kind, 'neutral') : 'n/a'}</td></tr>
-            <tr><td>Status</td><td>${activeFallbackStep ? badge(activeFallbackStep.status, formatFallbackStepTone(activeFallbackStep.status, activeFallbackStep.kind)) : 'n/a'}</td></tr>
-            <tr><td>Title</td><td>${escapeHtml(activeFallbackStep?.title || 'n/a')}</td></tr>
-            <tr><td>File</td><td>${escapeHtml(activeFallbackStep?.file || 'n/a')}</td></tr>
-            <tr><td>Error</td><td>${escapeHtml(activeFallbackStep?.error || 'n/a')}</td></tr>
-            <tr><td>Detail</td><td>${escapeHtml(activeFallbackStep?.detail || 'n/a')}</td></tr>
-          </tbody>
-        </table></div>
-        <div style="margin-top:1.25rem;">
-          <h3 style="margin:0 0 0.75rem;">Step timeline</h3>
-          <div class="table-wrap"><table>
-            <thead><tr><th>Seq</th><th>Kind</th><th>Status</th><th>Title</th><th>File</th><th>Error snippet</th></tr></thead>
-            <tbody>
-              ${fallbackSteps.map((step) => `<tr${activeFallbackStep && Number(step.seq) === Number(activeFallbackStep.seq) ? ' style="outline: 2px solid rgba(28, 76, 99, 0.35); outline-offset: -2px; background: rgba(28, 76, 99, 0.06);"' : ''}>
-                <td><a class="text-link" href="${escapeHtml(buildReplayHref({ eventSeq: step.seq }))}">${escapeHtml(step.seq)}</a></td>
-                <td>${badge(step.kind, 'neutral')}</td>
-                <td>${badge(step.status, formatFallbackStepTone(step.status, step.kind))}</td>
-                <td>${escapeHtml(step.title)}</td>
-                <td>${escapeHtml(step.file)}</td>
-                <td>${escapeHtml(summarizeErrorSnippet(step.error, step.detail))}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table></div>
-        </div>` : '<div class="empty-state"><h3>No synthetic steps</h3><p>Run detail did not include specs, tests, or artifacts to build the Cypress-style fallback timeline.</p></div>'}
-      </section>` : ''}
       <section class="panel">
         <div class="panel-header">
           <div>
             <h2>Stream Player</h2>
-            <p>Step through the selected stream event-by-event and inspect the active frame payload.</p>
+            <p>Step through the selected stream event-by-event and inspect the active replay payload.</p>
           </div>
           ${activeEvent ? badge(`Seq ${activeEvent.seq}`, 'neutral') : ''}
         </div>
@@ -1216,6 +1077,30 @@ function renderReplayV2Page(shell, runId, streamsResp, eventsResp, selectedStrea
             <tr><td>Payload</td><td>${formatJsonInline(activeEvent?.payload_json || activeEvent?.data_json)}</td></tr>
           </tbody>
         </table></div>`}
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Visual Playback</h2>
+            <p>Renders the active event snapshot captured in-browser and stored in replay payloads.</p>
+          </div>
+          ${activeSnapshot ? badge(activeSnapshot.truncated ? 'Snapshot truncated' : 'Snapshot ready', activeSnapshot.truncated ? 'warning' : 'success') : ''}
+        </div>
+        ${!selectedStream ? '<div class="empty-state"><h3>No stream selected</h3><p>Select a replay stream to inspect visual playback.</p></div>' : !activeEvent ? '<div class="empty-state"><h3>No active event</h3><p>Select an event sequence to inspect its snapshot.</p></div>' : !activeSnapshot || !sanitizedSnapshotHtml ? '<div class="empty-state"><h3>No visual snapshot</h3><p>The active event does not include a browser HTML snapshot.</p></div>' : `<div class="metrics-grid">
+          ${summaryCard('URL', activeSnapshotMeta.url || 'n/a', activeSnapshotMeta.title || 'No document title')}
+          ${summaryCard('Viewport', activeSnapshotMeta.viewport ? `${activeSnapshotMeta.viewport.width || 0}×${activeSnapshotMeta.viewport.height || 0}` : 'n/a', activeSnapshotMeta.viewport?.devicePixelRatio ? `DPR ${activeSnapshotMeta.viewport.devicePixelRatio}` : 'No DPR')}
+          ${summaryCard('Scroll', activeSnapshotMeta.scroll ? `${activeSnapshotMeta.scroll.x || 0}, ${activeSnapshotMeta.scroll.y || 0}` : 'n/a', activeSnapshotMeta.readyState || 'No readyState')}
+          ${summaryCard('Snapshot Size', activeSnapshot.originalSize ? `${activeSnapshot.originalSize} chars` : 'n/a', activeSnapshot.capturedAt ? `Captured ${formatDate(activeSnapshot.capturedAt)}` : 'No capture time')}
+        </div>
+        <div style="margin-top:1rem; border:1px solid rgba(15, 23, 42, 0.12); border-radius:20px; overflow:hidden; background:#fff;">
+          <iframe
+            title="Replay visual snapshot"
+            sandbox=""
+            referrerpolicy="no-referrer"
+            srcdoc="${escapeHtml(sanitizedSnapshotHtml)}"
+            style="display:block; width:100%; min-height:420px; border:0; background:#fff;"
+          ></iframe>
+        </div>`}
       </section>
       <section class="panel">
         <div class="panel-header">
@@ -1989,7 +1874,6 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
   let metricsResp = { item: null };
   let targetsResp = { items: [] };
   let seekResp = { item: null };
-  let fallbackBundle = null;
   const seekSeq = String(request.query?.seq || '').trim();
   const eventSeq = String(request.query?.eventSeq || '').trim();
   if (selectedStreamId) {
@@ -2012,8 +1896,6 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
     } catch (error) {
       if (error.statusCode !== 404) throw error;
     }
-  } else {
-    fallbackBundle = null;
   }
 
   return reply.type('text/html').send(renderReplayV2Page(
@@ -2027,8 +1909,7 @@ app.get('/app/runs/:id/replay-v2', async (request, reply) => {
     seekResp,
     seekSeq,
     selectionMeta,
-    eventSeq,
-    fallbackBundle
+    eventSeq
   ));
 });
 

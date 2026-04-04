@@ -1,6 +1,7 @@
 const DEFAULT_MAX_QUEUE = 1500;
 const DEFAULT_BATCH_SIZE = 200;
 const DEFAULT_MUTATION_DEBOUNCE_MS = 250;
+const DEFAULT_SNAPSHOT_MAX_CHARS = 120 * 1024;
 
 function clip(value, max = 240) {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
@@ -13,17 +14,37 @@ function toInteger(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function safeJson(value, depth = 0) {
+function sanitizeSnapshotPayload(value, snapshotMaxChars) {
+  if (!value || typeof value !== 'object') return null;
+  const html = typeof value.html === 'string' ? value.html : '';
+  const normalizedHtml = html.slice(0, snapshotMaxChars);
+  const metadata = value.metadata && typeof value.metadata === 'object'
+    ? safeJson(value.metadata, 0, '', snapshotMaxChars)
+    : null;
+
+  return compactObject({
+    html: normalizedHtml,
+    metadata,
+    capturedAt: typeof value.capturedAt === 'string' ? clip(value.capturedAt, 64) : null,
+    truncated: html.length > normalizedHtml.length,
+    originalSize: html.length || null
+  });
+}
+
+function safeJson(value, depth = 0, key = '', snapshotMaxChars = DEFAULT_SNAPSHOT_MAX_CHARS) {
   if (depth > 3) return '[max-depth]';
   if (value == null) return value;
+  if (key === 'snapshot' && typeof value === 'object') {
+    return sanitizeSnapshotPayload(value, snapshotMaxChars);
+  }
   if (typeof value === 'string') return clip(value, 500);
   if (typeof value === 'number' || typeof value === 'boolean') return value;
-  if (Array.isArray(value)) return value.slice(0, 25).map((item) => safeJson(item, depth + 1));
+  if (Array.isArray(value)) return value.slice(0, 25).map((item) => safeJson(item, depth + 1, '', snapshotMaxChars));
   if (typeof value === 'function') return '[function]';
   if (typeof value === 'object') {
     const output = {};
     for (const [key, raw] of Object.entries(value).slice(0, 40)) {
-      output[key] = safeJson(raw, depth + 1);
+      output[key] = safeJson(raw, depth + 1, key, snapshotMaxChars);
     }
     return output;
   }
@@ -185,6 +206,48 @@ function chunkArray(values, size) {
   return chunks;
 }
 
+function captureDocumentSnapshot(win, snapshotMaxChars) {
+  try {
+    const doc = win?.document;
+    const root = doc?.documentElement;
+    if (!doc || !root) return null;
+
+    const doctype = doc.doctype
+      ? `<!DOCTYPE ${doc.doctype.name}${doc.doctype.publicId ? ` PUBLIC "${doc.doctype.publicId}"` : ''}${doc.doctype.systemId ? ` "${doc.doctype.systemId}"` : ''}>`
+      : '<!DOCTYPE html>';
+    const html = `${doctype}\n${root.outerHTML || ''}`;
+
+    return sanitizeSnapshotPayload({
+      html,
+      metadata: {
+        url: clip(win.location?.href || '', 2000),
+        title: clip(doc.title || '', 300),
+        readyState: clip(doc.readyState || '', 32),
+        viewport: {
+          width: Number.isFinite(win.innerWidth) ? win.innerWidth : null,
+          height: Number.isFinite(win.innerHeight) ? win.innerHeight : null,
+          devicePixelRatio: Number.isFinite(win.devicePixelRatio) ? Number(win.devicePixelRatio) : null
+        },
+        scroll: {
+          x: Number.isFinite(win.scrollX) ? Math.round(win.scrollX) : 0,
+          y: Number.isFinite(win.scrollY) ? Math.round(win.scrollY) : 0
+        }
+      },
+      capturedAt: new Date().toISOString()
+    }, snapshotMaxChars);
+  } catch (error) {
+    return {
+      html: '',
+      metadata: {
+        captureError: clip(error?.message || error, 300)
+      },
+      capturedAt: new Date().toISOString(),
+      truncated: false,
+      originalSize: 0
+    };
+  }
+}
+
 export function installTestHarborReplayHooks(options = {}) {
   const CypressRef = globalThis?.Cypress;
   if (!CypressRef || typeof CypressRef.on !== 'function') return;
@@ -196,15 +259,20 @@ export function installTestHarborReplayHooks(options = {}) {
   const maxQueue = Math.max(200, toInteger(options.maxQueue ?? CypressRef.env('TESTHARBOR_REPLAY_MAX_QUEUE'), DEFAULT_MAX_QUEUE));
   const batchSize = Math.max(25, toInteger(options.batchSize ?? CypressRef.env('TESTHARBOR_REPLAY_BATCH_SIZE'), DEFAULT_BATCH_SIZE));
   const mutationDebounceMs = Math.max(50, toInteger(options.mutationDebounceMs ?? CypressRef.env('TESTHARBOR_REPLAY_MUTATION_DEBOUNCE_MS'), DEFAULT_MUTATION_DEBOUNCE_MS));
+  const snapshotMaxChars = Math.max(
+    10_000,
+    toInteger(options.snapshotMaxChars ?? CypressRef.env('TESTHARBOR_REPLAY_SNAPSHOT_MAX_CHARS'), DEFAULT_SNAPSHOT_MAX_CHARS)
+  );
 
   const replayQueue = [];
   const knownTargets = new Map();
   let commandCounter = 0;
+  const getActiveWindow = () => CypressRef.state?.('window') || globalThis.window || globalThis;
 
   const queueReplay = (kind, payload) => {
     pushQueue(replayQueue, {
       kind,
-      payload: safeJson(payload)
+      payload: safeJson(payload, 0, '', snapshotMaxChars)
     }, maxQueue);
   };
 
@@ -253,6 +321,11 @@ export function installTestHarborReplayHooks(options = {}) {
     });
   };
 
+  const withSnapshot = (payload = {}, win = getActiveWindow()) => compactObject({
+    ...payload,
+    snapshot: captureDocumentSnapshot(win, snapshotMaxChars)
+  });
+
   const flushReplayQueue = () => {
     if (!replayQueue.length || !globalThis.cy || typeof globalThis.cy.task !== 'function') {
       return globalThis.cy && typeof globalThis.cy.wrap === 'function'
@@ -273,7 +346,8 @@ export function installTestHarborReplayHooks(options = {}) {
     queueReplay('dom', {
       eventType: 'NAVIGATION',
       url: clip(url, 500),
-      source: 'url:changed'
+      source: 'url:changed',
+      snapshot: captureDocumentSnapshot(getActiveWindow(), snapshotMaxChars)
     });
   });
 
@@ -290,23 +364,23 @@ export function installTestHarborReplayHooks(options = {}) {
       commandId,
       targetId: target?.targetId || null,
       selectors: target?.selectors || null,
-      payload: {
+      payload: withSnapshot({
         eventType: 'COMMAND',
         name: commandName,
         message: commandMessage,
         consoleProps: parseConsoleProps(log),
         source: 'log:added'
-      }
+      })
     });
 
     if (['click', 'type', 'select', 'check', 'uncheck', 'submit', 'trigger'].includes(commandName.toLowerCase())) {
-      queueReplay('dom', {
+      queueReplay('dom', withSnapshot({
         eventType: 'INTERACTION',
         commandId,
         commandName,
         targetId: target?.targetId || null,
-        url: clip(globalThis.location?.href || '', 500)
-      });
+        url: clip(getActiveWindow()?.location?.href || '', 500)
+      }, getActiveWindow()));
     }
   });
 
@@ -448,14 +522,14 @@ export function installTestHarborReplayHooks(options = {}) {
           if (mutation.type === 'attributes') attributeChanges += 1;
         }
 
-        queueReplay('dom', {
+        queueReplay('dom', withSnapshot({
           eventType: 'MUTATION',
           mutationCount: mutations.length,
           addedNodes,
           removedNodes,
           attributeChanges,
           url: clip(win.location?.href || '', 500)
-        });
+        }, win));
       });
 
       observer.observe(win.document.documentElement, {
@@ -468,6 +542,13 @@ export function installTestHarborReplayHooks(options = {}) {
         observer.disconnect();
       }, { once: true });
     }
+
+    win.addEventListener('load', () => {
+      queueReplay('dom', withSnapshot({
+        eventType: 'SNAPSHOT',
+        source: 'window:load'
+      }, win));
+    }, { once: true });
   });
 
   if (typeof globalThis.beforeEach === 'function') {
@@ -476,7 +557,8 @@ export function installTestHarborReplayHooks(options = {}) {
       enqueueLifecycle('TEST_BOUNDARY', {
         phase: 'beforeEach',
         title: clip(currentTest?.title || '', 180),
-        fullTitle: clip(currentTest?.fullTitle?.() || '', 300)
+        fullTitle: clip(currentTest?.fullTitle?.() || '', 300),
+        snapshot: captureDocumentSnapshot(getActiveWindow(), snapshotMaxChars)
       });
     });
   }
@@ -489,7 +571,8 @@ export function installTestHarborReplayHooks(options = {}) {
         title: clip(currentTest?.title || '', 180),
         fullTitle: clip(currentTest?.fullTitle?.() || '', 300),
         state: normalizeState(currentTest?.state),
-        durationMs: Number.isFinite(currentTest?.duration) ? currentTest.duration : null
+        durationMs: Number.isFinite(currentTest?.duration) ? currentTest.duration : null,
+        snapshot: captureDocumentSnapshot(getActiveWindow(), snapshotMaxChars)
       });
       return flushReplayQueue();
     });
